@@ -15,10 +15,11 @@ from tqdm import tqdm
 from torchvision import transforms as T
 import traceback
 import ctypes
+import math
 
 # Constants
 NUM_CLASSES = 100
-TARGET_FRAMES = 32  # number of frames per video
+TARGET_FRAMES = 16  # number of frames per video
 
     # Read video frames using OpenCV with fps detection
 def read_video(video_path):
@@ -41,26 +42,129 @@ def read_video(video_path):
     frames = torch.from_numpy(np.stack(frames, axis=0))
     return frames, fps
 
-# Define CRNN model
-class CRNN(nn.Module):
-    def __init__(self, num_classes=100, hidden_size=256, resnet_pretrained_weights=None):
-        super(CRNN, self).__init__()
-        resnet = models.resnet18(weights=resnet_pretrained_weights)
-        self.cnn = nn.Sequential(*list(resnet.children())[:-2])
-        self.feature_dim = 512
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.rnn = nn.LSTM(self.feature_dim, hidden_size, batch_first=True, dropout=0.3)
-        self.fc = nn.Linear(hidden_size, num_classes)
+# Define ConvNeXtTransformer model
+class PositionalEncoding(nn.Module):
+    """Positional encoding cho temporal sequence"""
+    def __init__(self, d_model, max_len=64, dropout=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+
+        self.register_buffer('pe', pe)
 
     def forward(self, x):
-        B, T, C, H, W = x.size()
+        # x: (B, T, d_model)
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+
+class AttentionPooling(nn.Module):
+    """Attention pooling thay cho last hidden của LSTM"""
+    def __init__(self, dim):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(dim, dim // 4),
+            nn.Tanh(),
+            nn.Linear(dim // 4, 1)
+        )
+
+    def forward(self, x):
+        # x: (B, T, dim)
+        attn_weights = self.attention(x)  # (B, T, 1)
+        attn_weights = F.softmax(attn_weights, dim=1)
+        pooled = torch.sum(attn_weights * x, dim=1)  # (B, dim)
+        return pooled
+
+
+class ConvNeXtTransformer(nn.Module):
+    """
+    ConvNeXt-Tiny + Transformer
+
+    Input:  (B, T, C, H, W) = (B, 16, 3, 224, 224)
+    Output: (B, num_classes) = (B, 100)
+    """
+    def __init__(self, num_classes=100, hidden_size=256, resnet_pretrained_weights=None):
+        super().__init__()
+
+        # 1. ConvNeXt-Tiny Backbone
+        convnext = models.convnext_tiny(weights=models.ConvNeXt_Tiny_Weights.IMAGENET1K_V1)
+        self.cnn = convnext.features
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # ConvNeXt-Tiny output = 768
+        self.feature_dim = 768
+
+        # 2. Positional Encoding
+        self.pos_encoder = PositionalEncoding(
+            d_model=self.feature_dim,
+            max_len=64,
+            dropout=0.1
+        )
+
+        # 3. Transformer Encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.feature_dim,
+            nhead=8,
+            dim_feedforward=self.feature_dim * 4,
+            dropout=0.3,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
+
+        # 4. Attention Pooling
+        self.attention_pool = AttentionPooling(self.feature_dim)
+
+        # 5. Classifier
+        self.fc = nn.Sequential(
+            nn.LayerNorm(self.feature_dim),
+            nn.Dropout(0.4),
+            nn.Linear(self.feature_dim, num_classes)
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.transformer.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        for m in self.attention_pool.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        B, T, C, H, W = x.shape
+
+        # CNN: (B, T, C, H, W) → (B, T, 768)
         x = x.view(B * T, C, H, W)
-        features = self.cnn(x)
-        pooled = self.pool(features).squeeze(-1).squeeze(-1)
-        seq = pooled.view(B, T, self.feature_dim)
-        rnn_out, _ = self.rnn(seq)
-        final = rnn_out[:, -1, :]
-        return self.fc(final)
+        x = self.cnn(x)
+        x = self.pool(x)
+        x = x.view(B, T, self.feature_dim)
+
+        # Transformer: (B, T, 768) → (B, T, 768)
+        x = self.pos_encoder(x)
+        x = self.transformer(x)
+
+        # Pooling: (B, T, 768) → (B, 768)
+        x = self.attention_pool(x)
+
+        # Classifier: (B, 768) → (B, num_classes)
+        x = self.fc(x)
+
+        return x
 
 # Preprocessing functions from VideoDataset
 class VideoPreprocessor:
@@ -87,8 +191,8 @@ class VideoPreprocessor:
         min_side = min(H, W)
         crop = T.CenterCrop(min_side)
         frames = crop(frames)
-        # Resize to 240x240
-        resize = T.Resize((240, 240))
+        # Resize to 224x224
+        resize = T.Resize((224, 224))
         frames = resize(frames)
         mean = torch.tensor(self.mean).view(1, 3, 1, 1)
         std = torch.tensor(self.std).view(1, 3, 1, 1)
@@ -101,7 +205,7 @@ class VideoPreprocessor:
         return frames.unsqueeze(0)  # Add batch dimension
 
 # Function to predict sign language from long video (sentence)
-def predict_sign_language_sentence(video_path, model_path='vsl.pth', label_mapping_path='dataset/label_mapping.pkl', device=None, window_size=32, stride=8, prediction_method='consecutive', confidence_threshold=0.0, block_durations=None, target_fps=None, block_duration_for_summary=1, show=False):
+def predict_sign_language_sentence(video_path, model_path='models/abc_vsl.pth', label_mapping_path='dataset/label_mapping.pkl', device=None, window_size=16, stride=8, prediction_method='consecutive', confidence_threshold=0.0, block_durations=None, target_fps=None, block_duration_for_summary=1, show=False):
     # Auto-detect device if not specified
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -126,7 +230,7 @@ def predict_sign_language_sentence(video_path, model_path='vsl.pth', label_mappi
     idx_to_label = {v: k for k, v in label_mapping.items()}
 
     # Initialize model
-    model = CRNN(num_classes=NUM_CLASSES, hidden_size=256, resnet_pretrained_weights=None)
+    model = ConvNeXtTransformer(num_classes=NUM_CLASSES, hidden_size=256, resnet_pretrained_weights=None)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model = model.to(device)
     model.eval()
@@ -362,10 +466,10 @@ def predict_sign_language_sentence(video_path, model_path='vsl.pth', label_mappi
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict sign language from video using trained model.")
     parser.add_argument("video_path", help="Path to the sign language video file.")
-    parser.add_argument("--model_path", default="models/vsl.pth", help="Path to the trained model file.")
+    parser.add_argument("--model_path", default="models/abc_vsl.pth", help="Path to the trained model file.")
     parser.add_argument("--label_mapping_path", default="dataset/label_mapping.json", help="Path to the label mapping file (JSON preferred, PKL fallback).")
     parser.add_argument("--device", default=None, help="Device to run the model on (cuda, cpu, or auto-detect if not specified).")
-    parser.add_argument("--window_size", type=int, default=32, help="Window size for sliding window prediction.")
+    parser.add_argument("--window_size", type=int, default=16, help="Window size for sliding window prediction.")
     parser.add_argument("--stride", type=int, default=8, help="Stride for sliding window prediction.")
     parser.add_argument("--confidence_threshold", type=float, default=0.1, help="Minimum confidence threshold to consider predictions (0.0 to 1.0).")
     parser.add_argument("--target_fps", type=float, default=10, help="Target FPS to resample video frames to match training data (e.g., 10.0).")
