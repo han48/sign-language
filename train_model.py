@@ -10,11 +10,13 @@ import cv2
 import csv
 import math
 import random
+import glob
 from torchvision import models
 from torch.utils.data import Dataset, DataLoader, random_split, WeightedRandomSampler
 from torch.optim import AdamW
 from sklearn.metrics import precision_recall_fscore_support
 from tqdm import tqdm
+import argparse
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -474,10 +476,57 @@ def validate(model, dataloader, criterion, device='cuda'):
     return total_loss / len(dataloader), {'precision': precision*100, 'recall': recall*100, 'f1': f1*100}
 
 
+def cleanup_old_checkpoints(max_checkpoints):
+    """Remove old checkpoints, keeping only the latest max_checkpoints"""
+    if max_checkpoints is None or max_checkpoints <= 0:
+        return
+    
+    os.makedirs('checkpoints', exist_ok=True)
+    checkpoint_files = glob.glob('checkpoints/checkpoint_epoch_*.pth')
+    if len(checkpoint_files) <= max_checkpoints:
+        return
+    
+    # Extract epoch numbers
+    epochs = []
+    for f in checkpoint_files:
+        try:
+            epoch = int(f.split('_')[-1].replace('.pth', ''))
+            epochs.append((epoch, f))
+        except ValueError:
+            continue
+    
+    # Sort by epoch descending (newest first)
+    epochs.sort(key=lambda x: x[0], reverse=True)
+    
+    # Keep only max_checkpoints, remove the rest
+    to_remove = epochs[max_checkpoints:]
+    for _, f in to_remove:
+        os.remove(f)
+        print(f"Removed old checkpoint: {f}")
+
+
 def train_model(model, train_loader, val_loader,
-                num_epochs=20, lr=1e-4, device='cuda', save_path='best_model.pth'):
+                num_epochs=20, lr=1e-4, device='cuda', save_path='best_model.pth', resume_epoch=None, max_checkpoints=None):
     """Full training loop with validation and test evaluation"""
     model = model.to(device)
+
+    # Resume from checkpoint if provided
+    start_epoch = 0
+    best_f1 = 0.0
+    if resume_epoch is not None:
+        checkpoint_path = f'checkpoints/checkpoint_epoch_{resume_epoch}.pth'
+        if os.path.exists(checkpoint_path):
+            print(f"Loading checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            # If optimizer state is saved, load it too (optional)
+            # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            best_f1 = checkpoint.get('best_f1', 0.0)
+            print(f"Resumed from epoch {start_epoch}, best F1: {best_f1:.2f}%")
+        else:
+            print(f"Checkpoint {checkpoint_path} not found, starting from epoch 0")
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -485,8 +534,15 @@ def train_model(model, train_loader, val_loader,
         optimizer, 'min', factor=0.5, patience=3
     )
 
-    best_f1 = 0.0
-    for epoch in range(num_epochs):
+    # Check if results.csv exists, if not, write header
+    results_file = 'results.csv'
+    file_exists = os.path.exists(results_file)
+    with open(results_file, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(['epoch', 'train_loss', 'val_loss', 'precision', 'recall', 'f1'])
+
+    for epoch in range(start_epoch, num_epochs):
         print(f"\n===== Epoch {epoch+1}/{num_epochs} ======")
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_metrics = validate(model, val_loader, criterion, device)
@@ -494,15 +550,49 @@ def train_model(model, train_loader, val_loader,
 
         print(f"Val F1: {val_metrics['f1']:.2f}% | Precision: {val_metrics['precision']:.2f}% | Recall: {val_metrics['recall']:.2f}%")
 
+        # Write to CSV
+        with open(results_file, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                epoch + 1,
+                f"{train_loss:.4f}",
+                f"{val_loss:.4f}",
+                f"{val_metrics['precision']:.2f}",
+                f"{val_metrics['recall']:.2f}",
+                f"{val_metrics['f1']:.2f}"
+            ])
+
+        # Always save checkpoint with epoch index
+        os.makedirs('checkpoints', exist_ok=True)
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'best_f1': best_f1
+        }
+        checkpoint_path = f'checkpoints/checkpoint_epoch_{epoch+1}.pth'
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Checkpoint saved: {checkpoint_path}")
+        
+        # Cleanup old checkpoints
+        cleanup_old_checkpoints(max_checkpoints)
+
         if val_metrics['f1'] > best_f1:
             best_f1 = val_metrics['f1']
-            torch.save(model.state_dict(), save_path)
+            # Also save as best_model.pth
+            torch.save(checkpoint, save_path)
             print(f"✓ Best model saved with F1: {best_f1:.2f}%")
 
     return model
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Train Video Model')
+    parser.add_argument('--resume', type=int, default=None, help='Epoch number to resume training from (loads checkpoints/checkpoint_epoch_{epoch}.pth)')
+    parser.add_argument('--max-checkpoints', type=int, default=5, help='Maximum number of checkpoints to keep (default: keep all)')
+    args = parser.parse_args()
+
     # Tạo datasets
     train_dataset_base = VideoDataset(
         'dataset/train',
@@ -562,7 +652,9 @@ if __name__ == '__main__':
         num_epochs=25,
         lr=1e-4,
         device='cuda',
-        save_path='augmented_balanced_convnexttransformer_best_model.pth'
+        save_path='augmented_balanced_convnexttransformer_best_model.pth',
+        resume_epoch=args.resume,
+        max_checkpoints=args.max_checkpoints
     )
 
     # Export public result

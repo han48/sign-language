@@ -10,6 +10,7 @@ import cv2
 import csv
 import math
 import random
+import glob
 from torchvision import models
 from torch.utils.data import Dataset, DataLoader, random_split, WeightedRandomSampler
 from torch.optim import AdamW
@@ -193,6 +194,34 @@ def keypoints_to_dict(keypoints):
     
     return result
 
+def cleanup_old_checkpoints(max_checkpoints):
+    """Remove old checkpoints, keeping only the latest max_checkpoints"""
+    if max_checkpoints is None or max_checkpoints <= 0:
+        return
+    
+    os.makedirs('mp_checkpoints', exist_ok=True)
+    checkpoint_files = glob.glob('mp_checkpoints/mp_checkpoint_epoch_*.pth')
+    if len(checkpoint_files) <= max_checkpoints:
+        return
+    
+    # Extract epoch numbers
+    epochs = []
+    for f in checkpoint_files:
+        try:
+            epoch = int(f.split('_')[-1].replace('.pth', ''))
+            epochs.append((epoch, f))
+        except ValueError:
+            continue
+    
+    # Sort by epoch descending (newest first)
+    epochs.sort(key=lambda x: x[0], reverse=True)
+    
+    # Keep only max_checkpoints, remove the rest
+    to_remove = epochs[max_checkpoints:]
+    for _, f in to_remove:
+        os.remove(f)
+        print(f"Removed old checkpoint: {f}")
+
 def read_video_and_extract_keypoints(video_path, pose_model, hand_model, pose_name, hand_name, target_frames=16, show=False):
     """Read video and extract keypoints for all frames"""
     cap = cv2.VideoCapture(video_path)
@@ -263,9 +292,10 @@ def preprocess_keypoints(root_dir, label_to_idx_path, keypoints_cache_dir=None, 
         pose_model = init_pose_model(pose_name)
         for hand_name in HAND_MODELS.keys():
             hand_model = init_hand_model(hand_name)
-            for label_folder in sorted(os.listdir(root_dir))[:NUM_CLASSES]:
-                path = os.path.join(root_dir, label_folder)
+            for item in sorted(os.listdir(root_dir)):
+                path = os.path.join(root_dir, item)
                 if os.path.isdir(path):
+                    label_folder = item
                     for video_file in os.listdir(path):
                         video_path = os.path.join(path, video_file)
                         # Create relative path for cache
@@ -288,6 +318,27 @@ def preprocess_keypoints(root_dir, label_to_idx_path, keypoints_cache_dir=None, 
                                 print(f"Error processing {video_file} with {pose_name}/{hand_name}: {e}")
                         else:
                             print(f"Cache exists for {video_file} with {pose_name}/{hand_name}, skipping")
+                elif os.path.isfile(path) and item.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+                    video_file = item
+                    video_path = path
+                    relative_path = item
+                    base_name = item.replace('.mp4', '').replace('.avi', '').replace('.mov', '').replace('.mkv', '')
+                    cache_file = os.path.join(keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
+                    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+
+                    if force_recreate or not os.path.exists(cache_file):
+                        try:
+                            frames_keypoints = read_video_and_extract_keypoints(
+                                video_path, pose_model, hand_model, pose_name, hand_name, TARGET_FRAMES, show=show
+                            )
+                            with open(cache_file, 'w') as f:
+                                json.dump(frames_keypoints, f)
+                            total_videos += 1
+                            print(f"Processed {total_videos}: {video_file} with {pose_name} pose and {hand_name} hand")
+                        except Exception as e:
+                            print(f"Error processing {video_file} with {pose_name}/{hand_name}: {e}")
+                    else:
+                        print(f"Cache exists for {video_file} with {pose_name}/{hand_name}, skipping")
 
     print(f"Preprocessing complete. Total new videos processed: {total_videos}")
 
@@ -475,7 +526,11 @@ def evaluate_keypoints(model, folder_path, label_to_idx_path, output_csv="predic
     if keypoints_cache_dir is None:
         keypoints_cache_dir = folder_path + '-json'
     if model_path:
-        model.load_state_dict(torch.load(model_path))
+        checkpoint = torch.load(model_path)
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
         print(f"Loaded model from {model_path}")
 
     model = model.to(device)
@@ -554,23 +609,27 @@ def validate_keypoints(model, dataloader, criterion, device='cuda'):
     return total_loss / len(dataloader), {'precision': precision*100, 'recall': recall*100, 'f1': f1*100}
 
 def train_keypoint_model(model, train_loader, val_loader,
-                         num_epochs=20, lr=1e-4, device='cuda', save_path='best_mp_model.pth', checkpoint_path=None):
+                         num_epochs=20, lr=1e-4, device='cuda', save_path='best_mp_model.pth', resume_epoch=None, max_checkpoints=None):
     """Full training loop for keypoints model"""
     model = model.to(device)
 
     # Resume from checkpoint if provided
     start_epoch = 0
     best_f1 = 0.0
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        print(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        # If optimizer state is saved, load it too (optional)
-        # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        # scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint.get('epoch', 0) + 1
-        best_f1 = checkpoint.get('best_f1', 0.0)
-        print(f"Resumed from epoch {start_epoch}, best F1: {best_f1:.2f}%")
+    if resume_epoch is not None:
+        checkpoint_path = f'mp_checkpoints/mp_checkpoint_epoch_{resume_epoch}.pth'
+        if os.path.exists(checkpoint_path):
+            print(f"Loading checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            # If optimizer state is saved, load it too (optional)
+            # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            best_f1 = checkpoint.get('best_f1', 0.0)
+            print(f"Resumed from epoch {start_epoch}, best F1: {best_f1:.2f}%")
+        else:
+            print(f"Checkpoint {checkpoint_path} not found, starting from epoch 0")
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -606,15 +665,25 @@ def train_keypoint_model(model, train_loader, val_loader,
                 f"{val_metrics['f1']:.2f}"
             ])
 
+        # Always save checkpoint with epoch index
+        os.makedirs('mp_checkpoints', exist_ok=True)
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'best_f1': best_f1
+        }
+        checkpoint_path = f'mp_checkpoints/mp_checkpoint_epoch_{epoch+1}.pth'
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Checkpoint saved: {checkpoint_path}")
+        
+        # Cleanup old checkpoints
+        cleanup_old_checkpoints(max_checkpoints)
+
         if val_metrics['f1'] > best_f1:
             best_f1 = val_metrics['f1']
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_f1': best_f1
-            }
+            # Also save as best_mp_model.pth
             torch.save(checkpoint, save_path)
             print(f"✓ Best model saved with F1: {best_f1:.2f}%")
 
@@ -624,7 +693,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train MediaPipe Keypoint Model')
     parser.add_argument('--show', action='store_true', help='Show MediaPipe processing visualization')
     parser.add_argument('--force-recreate', action='store_true', help='Force recreate cache files even if they exist')
-    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume training from')
+    parser.add_argument('--resume', type=int, default=None, help='Epoch number to resume training from (loads mp_checkpoints/mp_checkpoint_epoch_{epoch}.pth)')
+    parser.add_argument('--max-checkpoints', type=int, default=5, help='Maximum number of checkpoints to keep (default: keep all)')
     args = parser.parse_args()
 
     # Preprocess keypoints for train dataset
@@ -702,7 +772,8 @@ if __name__ == '__main__':
         lr=1e-4,
         device='cuda',
         save_path='best_mp_model.pth',
-        checkpoint_path=args.resume
+        resume_epoch=args.resume,
+        max_checkpoints=args.max_checkpoints
     )
 
     # Export public result

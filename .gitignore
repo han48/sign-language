@@ -219,3 +219,6 @@ datasets/
 dataset/
 models/
 model/
+
+*.pth
+results.csv
