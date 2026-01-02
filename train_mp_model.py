@@ -554,9 +554,23 @@ def validate_keypoints(model, dataloader, criterion, device='cuda'):
     return total_loss / len(dataloader), {'precision': precision*100, 'recall': recall*100, 'f1': f1*100}
 
 def train_keypoint_model(model, train_loader, val_loader,
-                         num_epochs=20, lr=1e-4, device='cuda', save_path='best_mp_model.pth'):
+                         num_epochs=20, lr=1e-4, device='cuda', save_path='best_mp_model.pth', checkpoint_path=None):
     """Full training loop for keypoints model"""
     model = model.to(device)
+
+    # Resume from checkpoint if provided
+    start_epoch = 0
+    best_f1 = 0.0
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        # If optimizer state is saved, load it too (optional)
+        # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        best_f1 = checkpoint.get('best_f1', 0.0)
+        print(f"Resumed from epoch {start_epoch}, best F1: {best_f1:.2f}%")
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -564,8 +578,15 @@ def train_keypoint_model(model, train_loader, val_loader,
         optimizer, 'min', factor=0.5, patience=3
     )
 
-    best_f1 = 0.0
-    for epoch in range(num_epochs):
+    # Check if results.csv exists, if not, write header
+    results_file = 'results.csv'
+    file_exists = os.path.exists(results_file)
+    with open(results_file, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(['epoch', 'train_loss', 'val_loss', 'precision', 'recall', 'f1'])
+
+    for epoch in range(start_epoch, num_epochs):
         print(f"\n===== Epoch {epoch+1}/{num_epochs} ======")
         train_loss = train_epoch_keypoints(model, train_loader, criterion, optimizer, device)
         val_loss, val_metrics = validate_keypoints(model, val_loader, criterion, device)
@@ -573,9 +594,28 @@ def train_keypoint_model(model, train_loader, val_loader,
 
         print(f"Val F1: {val_metrics['f1']:.2f}% | Precision: {val_metrics['precision']:.2f}% | Recall: {val_metrics['recall']:.2f}%")
 
+        # Write to CSV
+        with open(results_file, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                epoch + 1,
+                f"{train_loss:.4f}",
+                f"{val_loss:.4f}",
+                f"{val_metrics['precision']:.2f}",
+                f"{val_metrics['recall']:.2f}",
+                f"{val_metrics['f1']:.2f}"
+            ])
+
         if val_metrics['f1'] > best_f1:
             best_f1 = val_metrics['f1']
-            torch.save(model.state_dict(), save_path)
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_f1': best_f1
+            }
+            torch.save(checkpoint, save_path)
             print(f"✓ Best model saved with F1: {best_f1:.2f}%")
 
     return model
@@ -584,6 +624,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train MediaPipe Keypoint Model')
     parser.add_argument('--show', action='store_true', help='Show MediaPipe processing visualization')
     parser.add_argument('--force-recreate', action='store_true', help='Force recreate cache files even if they exist')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume training from')
     args = parser.parse_args()
 
     # Preprocess keypoints for train dataset
@@ -657,10 +698,11 @@ if __name__ == '__main__':
         model,
         train_loader,
         val_loader,
-        num_epochs=25,
+        num_epochs=100,
         lr=1e-4,
         device='cuda',
-        save_path='best_mp_model.pth'
+        save_path='best_mp_model.pth',
+        checkpoint_path=args.resume
     )
 
     # Export public result

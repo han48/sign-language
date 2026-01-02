@@ -30,36 +30,57 @@ mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 
 def extract_keypoints_from_frame(frame, pose_model, hands_model, show=False):
-    """Extract arm and hand keypoints from a single frame using MediaPipe"""
+    """Extract arm and hand keypoints from a single frame using MediaPipe
+    
+    Keypoint structure (225 values):
+    - Pose landmarks (indices 0-98): 33 landmarks × 3 (x,y,z)
+      0-2: nose, 3-5: left_eye_inner, 6-8: left_eye, 9-11: left_eye_outer,
+      12-14: right_eye_inner, 15-17: right_eye, 18-20: right_eye_outer,
+      21-23: left_ear, 24-26: right_ear, 27-29: mouth_left, 30-32: mouth_right,
+      33-35: left_shoulder, 36-38: right_shoulder, 39-41: left_elbow, 42-44: right_elbow,
+      45-47: left_wrist, 48-50: right_wrist, 51-53: left_pinky, 54-56: right_pinky,
+      57-59: left_index, 60-62: right_index, 63-65: left_thumb, 66-68: right_thumb,
+      69-71: left_hip, 72-74: right_hip, 75-77: left_knee, 78-80: right_knee,
+      81-83: left_ankle, 84-86: right_ankle, 87-89: left_heel, 90-92: right_heel,
+      93-95: left_foot_index, 96-98: right_foot_index
+    - Hand 1 (indices 99-161): 21 landmarks × 3
+      99-101: wrist, 102-104: thumb_cmc, 105-107: thumb_mcp, 108-110: thumb_ip, 111-113: thumb_tip,
+      114-116: index_finger_mcp, 117-119: index_finger_pip, 120-122: index_finger_dip, 123-125: index_finger_tip,
+      126-128: middle_finger_mcp, 129-131: middle_finger_pip, 132-134: middle_finger_dip, 135-137: middle_finger_tip,
+      138-140: ring_finger_mcp, 141-143: ring_finger_pip, 144-146: ring_finger_dip, 147-149: ring_finger_tip,
+      150-152: pinky_mcp, 153-155: pinky_pip, 156-158: pinky_dip, 159-161: pinky_tip
+    - Hand 2 (indices 162-224): same as Hand 1
+    """
+    # Initialize with fixed size: pose (33*3=99) + hands (2*21*3=126) = 225
+    keypoints = [0.0] * 225
+    pose_results = None
+    hands_results = None
+
     # Convert to RGB for MediaPipe
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     h, w, _ = frame.shape
 
-    keypoints = []
-
-    # Pose for full body (all 33 landmarks)
+    # Extract pose keypoints (indices 0-98)
     pose_results = pose_model.process(frame_rgb)
     if pose_results.pose_landmarks:
-        for lm in pose_results.pose_landmarks.landmark:
-            keypoints.extend([lm.x, lm.y, lm.z])
+        for i, lm in enumerate(pose_results.pose_landmarks.landmark):
+            keypoints[i*3:(i+1)*3] = [lm.x, lm.y, lm.z]
 
-    # Hands
+    # Extract hand keypoints (indices 99-224: hand1 99-161, hand2 162-224)
+    hand_start_idx = 99
     hands_results = hands_model.process(frame_rgb)
     if hands_results.multi_hand_landmarks:
-        for hand_landmarks in hands_results.multi_hand_landmarks[:2]:  # Max 2 hands
-            for lm in hand_landmarks.landmark:
-                keypoints.extend([lm.x, lm.y, lm.z])
-
-    # If no keypoints, return zeros (for robustness)
-    if not keypoints:
-        keypoints = [0.0] * 225  # 33 pose + 42 hand points * 3 = 225 dims
+        for hand_idx, hand_landmarks in enumerate(hands_results.multi_hand_landmarks[:2]):
+            for i, lm in enumerate(hand_landmarks.landmark):
+                start = hand_start_idx + hand_idx * 63 + i * 3
+                keypoints[start:start+3] = [lm.x, lm.y, lm.z]
 
     # Visualize if show
     if show:
         annotated_image = frame.copy()
-        if pose_results.pose_landmarks:
+        if pose_results and pose_results.pose_landmarks:
             mp_drawing.draw_landmarks(annotated_image, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-        if hands_results.multi_hand_landmarks:
+        if hands_results and hands_results.multi_hand_landmarks:
             for hand_landmarks in hands_results.multi_hand_landmarks:
                 mp_drawing.draw_landmarks(annotated_image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
         cv2.imshow('MediaPipe Pose and Hands', annotated_image)
