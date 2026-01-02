@@ -219,7 +219,7 @@ class KeypointTransformer(nn.Module):
 
         return x
 
-def predict_sign_language(video_path, model_path='best_mp_model.pth', label_mapping_path='dataset/label_mapping.json', device='cuda', show=False):
+def predict_sign_language(video_path, model_path='models\mp_vls.pth', label_mapping_path='dataset/label_mapping.json', device='cuda', show=False):
     """Predict sign language from video using keypoints"""
     # Load label mapping
     with open(label_mapping_path, 'r', encoding='utf-8') as f:
@@ -228,7 +228,11 @@ def predict_sign_language(video_path, model_path='best_mp_model.pth', label_mapp
 
     # Initialize model
     model = KeypointTransformer(num_classes=NUM_CLASSES, d_model=64, hidden_size=256)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    checkpoint = torch.load(model_path, map_location=device)
+    if 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
     model = model.to(device)
     model.eval()
 
@@ -258,7 +262,7 @@ def predict_sign_language(video_path, model_path='best_mp_model.pth', label_mapp
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Predict Sign Language using MediaPipe Keypoints')
     parser.add_argument('--video', type=str, required=True, help='Path to input video')
-    parser.add_argument('--model', type=str, default='best_mp_model.pth', help='Path to trained model')
+    parser.add_argument('--model', type=str, default='models\mp_vls.pth', help='Path to trained model')
     parser.add_argument('--labels', type=str, default='dataset/label_mapping.json', help='Path to label mapping')
     parser.add_argument('--device', type=str, default='cuda', help='Device to run on')
     parser.add_argument('--show', action='store_true', help='Show MediaPipe processing visualization')
