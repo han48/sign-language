@@ -221,5 +221,6 @@ models/
 model/
 
 *.pth
+*.vsl
 results.csv
 .DS_Store
