@@ -222,3 +222,4 @@ model/
 
 *.pth
 results.csv
+.DS_Store

@@ -90,8 +90,22 @@ def extract_keypoints_from_frame(frame, pose_model, hands_model, show=False):
     return keypoints
 
 def read_video_and_extract_keypoints(video_path, pose_model, hands_model, target_frames=16, show=False):
-    """Read video and extract keypoints for all frames"""
+    """Read video and extract keypoints for all frames
+    
+    Args:
+        video_path: Path to video file
+        pose_model: MediaPipe pose model
+        hands_model: MediaPipe hands model
+        target_frames: Number of frames to downsample to. If None, return all frames without downsampling
+        show: Whether to show visualization
+    
+    Returns:
+        Tuple of (frames_keypoints, fps)
+    """
     cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps == 0:
+        fps = 30  # Default fallback
     frames_keypoints = []
     frame_count = 0
 
@@ -108,18 +122,18 @@ def read_video_and_extract_keypoints(video_path, pose_model, hands_model, target
     if len(frames_keypoints) == 0:
         raise ValueError(f"Could not extract keypoints from {video_path}")
 
-    # Downsample to target_frames
-    total = len(frames_keypoints)
-    if total >= target_frames:
-        indices = torch.linspace(0, total - 1, target_frames).long()
-    else:
-        indices = torch.arange(total)
-        pad = target_frames - total
-        indices = torch.cat([indices, indices[-1].repeat(pad)])
+    # Downsample to target_frames only if target_frames is specified
+    if target_frames is not None:
+        total = len(frames_keypoints)
+        if total >= target_frames:
+            indices = torch.linspace(0, total - 1, target_frames).long()
+        else:
+            indices = torch.arange(total)
+            pad = target_frames - total
+            indices = torch.cat([indices, indices[-1].repeat(pad)])
+        frames_keypoints = [frames_keypoints[i] for i in indices.tolist()]
 
-    frames_keypoints = [frames_keypoints[i] for i in indices.tolist()]
-
-    return frames_keypoints
+    return frames_keypoints, fps
 
 # Define KeypointTransformer model (from train_mp_model.py)
 class PositionalEncoding(nn.Module):
@@ -219,8 +233,22 @@ class KeypointTransformer(nn.Module):
 
         return x
 
-def predict_sign_language(video_path, model_path='models\mp_vls.pth', label_mapping_path='dataset/label_mapping.json', device='cuda', show=False):
-    """Predict sign language from video using keypoints"""
+def predict_sign_language(video_path, model_path='models/mp_vls.pth', label_mapping_path='dataset/label_mapping.json', device='cuda', show=False, block_durations=None, confidence_threshold=0.0, block_duration_for_summary=1):
+    """Predict sign language from video using keypoints with temporal block analysis
+    
+    Args:
+        video_path: Path to input video
+        model_path: Path to trained model
+        label_mapping_path: Path to label mapping
+        device: Device to run on (cuda/cpu)
+        show: Show visualization during processing
+        block_durations: List of block durations in seconds (default [1, 2, 3])
+        confidence_threshold: Minimum confidence to include prediction
+        block_duration_for_summary: Which block duration to use for final summary (1, 2, or 3)
+    
+    Returns:
+        List of (label_name, confidence) tuples
+    """
     # Load label mapping
     with open(label_mapping_path, 'r', encoding='utf-8') as f:
         label_mapping = json.load(f)
@@ -240,41 +268,128 @@ def predict_sign_language(video_path, model_path='models\mp_vls.pth', label_mapp
     pose_model = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5)
     hands_model = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
 
-    # Extract keypoints
+    # Extract keypoints with FPS
     print(f"Extracting keypoints from {video_path}...")
-    frames_keypoints = read_video_and_extract_keypoints(video_path, pose_model, hands_model, TARGET_FRAMES, show=show)
+    frames_keypoints_all, fps = read_video_and_extract_keypoints(video_path, pose_model, hands_model, target_frames=None, show=show)
+    total_frames = len(frames_keypoints_all)
+    print(f"Total frames: {total_frames}, FPS: {fps}")
 
-    # Predict
-    keypoints = torch.tensor(frames_keypoints, dtype=torch.float32).unsqueeze(0).to(device)  # (1, T, D)
-
-    with torch.no_grad():
-        outputs = model(keypoints)
-        _, predicted = outputs.max(1)
-        label_idx = predicted.item()
-        label_name = idx_to_label[label_idx]
-        confidence = torch.softmax(outputs, dim=1)[0][label_idx].item()
-
+    # Default block durations
+    if block_durations is None:
+        block_durations = [1, 2, 3]
+    
+    # Temporal block analysis with sliding windows
+    shift_duration = 0.5  # seconds
+    shift_frames = max(int(fps * shift_duration), 1)
+    
+    all_predictions = []
+    total_blocks = sum((total_frames - int(fps * d) + 1) // shift_frames + 1 for d in block_durations if int(fps * d) > 0)
+    
+    print(f"Processing {total_blocks} temporal blocks...")
+    with tqdm(total=total_blocks, desc="Temporal block analysis") as pbar:
+        for duration in block_durations:
+            frames_per_block = int(fps * duration)
+            if frames_per_block == 0:
+                frames_per_block = 30 * duration  # Fallback
+            
+            for start in range(0, total_frames - frames_per_block + 1, shift_frames):
+                end = min(start + frames_per_block, total_frames)
+                start_time_sec = start / fps
+                end_time_sec = end / fps
+                
+                # Extract keypoints for this block
+                block_keypoints = frames_keypoints_all[start:end]
+                
+                # Downsample to TARGET_FRAMES if needed
+                if len(block_keypoints) != TARGET_FRAMES:
+                    block_keypoints = downsample_keypoints(block_keypoints, TARGET_FRAMES)
+                
+                # Convert to tensor and predict
+                keypoints_tensor = torch.tensor(block_keypoints, dtype=torch.float32).unsqueeze(0).to(device)  # (1, T, D)
+                
+                with torch.no_grad():
+                    outputs = model(keypoints_tensor)
+                    probs = torch.softmax(outputs, dim=1)
+                    confidence, predicted = probs.max(1)
+                    label_idx = predicted.item()
+                    label_name = idx_to_label[label_idx]
+                    conf_value = confidence.item()
+                    
+                    if conf_value >= confidence_threshold:
+                        all_predictions.append((label_name, conf_value, start_time_sec, end_time_sec, duration))
+                
+                pbar.set_postfix(label=f"{label_name} ({conf_value:.2f})", time=f"{start_time_sec:.1f}-{end_time_sec:.1f}s")
+                pbar.update(1)
+    
+    # Print all predictions
+    print("\nAll predictions from temporal blocks:")
+    for i, (label, conf, start_t, end_t, dur) in enumerate(all_predictions):
+        print(f"{i+1}: {label} ({conf:.2f}) [{start_t:.1f}-{end_t:.1f}s] ({dur}s block)")
+    
+    # Summarize using majority vote
+    unique_predictions = []
+    if all_predictions:
+        filtered_predictions = [pred for pred in all_predictions if pred[4] == block_duration_for_summary]
+        if filtered_predictions:
+            label_counts = Counter([p for p, c, _, _, _ in filtered_predictions])
+            label_avg_conf = {}
+            for p in label_counts:
+                confs = [c for pred, c, _, _, _ in filtered_predictions if pred == p]
+                label_avg_conf[p] = sum(confs) / len(confs)
+            
+            seen = OrderedDict()
+            for p, c, s, e, d in filtered_predictions:
+                if p not in seen:
+                    seen[p] = (label_counts[p], s)
+            
+            if seen:
+                candidate_labels = [(p, v) for p, v in seen.items() if v[0] >= 2]
+                if candidate_labels:
+                    sorted_labels = sorted(candidate_labels, key=lambda x: (x[1][1], -label_avg_conf[x[0]]))
+                    unique_predictions = [(p, label_avg_conf[p]) for p, _ in sorted_labels]
+            
+            print(f"\nBest summary (majority vote from {block_duration_for_summary}s blocks): {' '.join([f'{p}({c:.2f})' for p, c in unique_predictions])}")
+        else:
+            print(f"No predictions from {block_duration_for_summary}s blocks.")
+    
     if show:
         cv2.destroyAllWindows()
 
-    return label_name, confidence
+    return unique_predictions
+
+
+def downsample_keypoints(frames_keypoints, target_frames):
+    """Downsample keypoints to target number of frames"""
+    total = len(frames_keypoints)
+    if total >= target_frames:
+        indices = torch.linspace(0, total - 1, target_frames).long()
+    else:
+        indices = torch.arange(total)
+        pad = target_frames - total
+        indices = torch.cat([indices, indices[-1].repeat(pad)])
+    
+    return [frames_keypoints[i] for i in indices.tolist()]
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Predict Sign Language using MediaPipe Keypoints')
+    parser = argparse.ArgumentParser(description='Predict Sign Language using MediaPipe Keypoints with Temporal Blocks')
     parser.add_argument('--video', type=str, required=True, help='Path to input video')
-    parser.add_argument('--model', type=str, default='models\mp_vls.pth', help='Path to trained model')
+    parser.add_argument('--model', type=str, default='models/mp_vls.pth', help='Path to trained model')
     parser.add_argument('--labels', type=str, default='dataset/label_mapping.json', help='Path to label mapping')
     parser.add_argument('--device', type=str, default='cuda', help='Device to run on')
+    parser.add_argument('--confidence_threshold', type=float, default=0.0, help='Minimum confidence threshold')
+    parser.add_argument('--block_duration_for_summary', type=int, default=1, help='Block duration for summary (1, 2, or 3)')
     parser.add_argument('--show', action='store_true', help='Show MediaPipe processing visualization')
     args = parser.parse_args()
 
     start_time = time()
     try:
-        label, confidence = predict_sign_language(
-            args.video, args.model, args.labels, args.device, args.show
+        results = predict_sign_language(
+            args.video, args.model, args.labels, args.device, args.show,
+            block_durations=[1, 2, 3], 
+            confidence_threshold=args.confidence_threshold,
+            block_duration_for_summary=args.block_duration_for_summary
         )
-        print(f"Predicted Label: {label}")
-        print(f"Confidence: {confidence:.4f}")
+        print(f"\nFinal Predicted Labels: {' '.join([f'{label}({conf:.4f})' for label, conf in results])}")
     except Exception as e:
         print(f"Error: {e}")
         traceback.print_exc()
