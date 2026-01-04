@@ -655,7 +655,7 @@ class ConvNeXtTransformer(nn.Module):
             # Always save checkpoint with epoch index
             os.makedirs(f'{save_directory}/checkpoints', exist_ok=True)
             checkpoint = {
-                'epoch': epoch,
+                'epoch': (epoch + 1),
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
@@ -937,7 +937,6 @@ class ConvNeXtTransformer(nn.Module):
         model.to(device)
         model.eval()
 
-        # Bước 3: dùng thêm metadata nếu cần
         epoch = ckpt.get("epoch")
         idx_to_label = ckpt.get("idx_to_label")
         best_f1 = ckpt.get("best_f1")
@@ -945,10 +944,11 @@ class ConvNeXtTransformer(nn.Module):
         f1 = ckpt.get("f1")
         recall = ckpt.get("recall")
         precision = ckpt.get("precision")
-        print(f"Model F1: {f1}, Recall: {recall}, Precision: {precision}")
-        print(f"Model loaded from epoch {epoch}, best F1: {best_f1}")
-        print(f"Label mapping: {idx_to_label}")
-        print(f"Predict steps: {predict_steps}")
+        if debug:
+            print(f"Model F1: {f1}, Recall: {recall}, Precision: {precision}")
+            print(f"Model loaded from epoch {epoch}, best F1: {best_f1}")
+            print(f"Label mapping: {idx_to_label}")
+            print(f"Predict steps: {predict_steps}")
 
         model.device = device
         model.epoch = epoch
@@ -1103,19 +1103,18 @@ if __name__ == '__main__':
     start_time = time()
     model = ConvNeXtTransformer.load_model(
         model_path=args.model_path, device=args.device)
-    exit(0)
 
-    # file_name = "prediction_status.vsl"
+    file_name = "prediction_status.vsl"
 
-    # def fn_push(status):
-    #     with open(file_name, "w", encoding="utf-8") as f:
-    #         content = f"{model.predict_steps.index(status[0]) + 1},{len(model.predict_steps)},{status[0]},{status[1]},{status[2]}"
-    #         f.write(content)
+    def fn_push(status):
+        with open(file_name, "w", encoding="utf-8") as f:
+            content = f"{model.predict_steps.index(status[0]) + 1},{len(model.predict_steps)},{status[0]},{status[1]},{status[2]}"
+            f.write(content)
 
-    # text, confidence, predicted_labels = model.predict_sign_language_sentence(
-    #     args.video_path, fn_push=fn_push, window_size=args.window_size, stride=args.stride, confidence_threshold=args.confidence_threshold, block_durations=None, target_fps=args.target_fps, block_duration_for_summary=args.block_duration_for_summary, show=args.show, debug=args.debug)
-    # print(text)
-    # print(confidence)
-    # print(f"{' '.join([f'{p}({c:.2f})' for p, c in predicted_labels])}")
-    # end_time = time()
-    # print(f"Prediction took {end_time - start_time:.2f} seconds.")
+    text, confidence, predicted_labels = model.predict_sign_language_sentence(
+        args.video_path, fn_push=fn_push, window_size=args.window_size, stride=args.stride, confidence_threshold=args.confidence_threshold, block_durations=None, target_fps=args.target_fps, block_duration_for_summary=args.block_duration_for_summary, show=args.show, debug=args.debug)
+    print(text)
+    print(confidence)
+    print(f"{' '.join([f'{p}({c:.2f})' for p, c in predicted_labels])}")
+    end_time = time()
+    print(f"Prediction took {end_time - start_time:.2f} seconds.")
