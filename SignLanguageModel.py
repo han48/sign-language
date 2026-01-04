@@ -1,3 +1,4 @@
+import argparse
 from time import time
 import os
 import cv2
@@ -11,9 +12,11 @@ import numpy as np
 import unicodedata
 import torch.nn as nn
 from tqdm import tqdm
+import mediapipe as mp
 from torch.optim import AdamW
 from torchvision import models
 import torch.nn.functional as F
+import mediapipe.tasks as mp_tasks
 from torchvision import transforms as T
 from collections import Counter, OrderedDict
 from torch.utils.data import Dataset, WeightedRandomSampler
@@ -129,6 +132,88 @@ class VideoAugmentation:
         frames = torch.clamp(frames, 0, 255)
 
         return frames.to(torch.uint8)
+
+
+class PositionalEncoding(nn.Module):
+    """Positional encoding cho temporal sequence"""
+
+    def __init__(self, d_model, max_len=64, dropout=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(
+            0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x: (B, T, d_model)
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+
+class AttentionPooling(nn.Module):
+    """Attention pooling thay cho last hidden của LSTM"""
+
+    def __init__(self, dim):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(dim, dim // 4),
+            nn.Tanh(),
+            nn.Linear(dim // 4, 1)
+        )
+
+    def forward(self, x):
+        # x: (B, T, dim)
+        attn_weights = self.attention(x)  # (B, T, 1)
+        attn_weights = F.softmax(attn_weights, dim=1)
+        pooled = torch.sum(attn_weights * x, dim=1)  # (B, dim)
+        return pooled
+
+
+class VideoPreprocessor:
+    def __init__(self, model, target_frames=32, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
+        self.target_frames = target_frames
+        self.mean = mean
+        self.std = std
+        self.model = model
+
+    def _downsample_frames(self, frames):
+        num_frames = frames.shape[0]
+        if num_frames == self.target_frames:
+            return frames
+        elif num_frames < self.target_frames:
+            pad = self.target_frames - num_frames
+            return torch.cat([frames, frames[-1:].repeat(pad, 1, 1, 1)], dim=0)
+        else:
+            idx = torch.linspace(0, num_frames - 1, self.target_frames).long()
+            return frames[idx]
+
+    def _normalize(self, frames):
+        frames = frames.permute(0, 3, 1, 2).float() / 255.0
+        # Center crop to square to avoid distortion
+        _, _, H, W = frames.shape
+        min_side = min(H, W)
+        crop = T.CenterCrop(min_side)
+        frames = crop(frames)
+        # Resize to 224x224
+        resize = T.Resize((224, 224))
+        frames = resize(frames)
+        mean = torch.tensor(self.mean).view(1, 3, 1, 1)
+        std = torch.tensor(self.std).view(1, 3, 1, 1)
+        return (frames - mean) / std
+
+    def preprocess(self, video_path):
+        frames = self.model.read_video(video_path, update_bar=False)
+        frames = self._downsample_frames(frames)
+        frames = self._normalize(frames)
+        return frames.unsqueeze(0)  # Add batch dimension
 
 
 class VideoDataset(Dataset):
@@ -248,88 +333,6 @@ class VideoDataset(Dataset):
         labels = torch.tensor([item['label_idx'] for item in batch])
         label_names = [item['label'] for item in batch]
         return {'frames': frames, 'label_idx': labels, 'label': label_names}
-
-
-class PositionalEncoding(nn.Module):
-    """Positional encoding cho temporal sequence"""
-
-    def __init__(self, d_model, max_len=64, dropout=0.1):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(
-            0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
-
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        # x: (B, T, d_model)
-        x = x + self.pe[:, :x.size(1), :]
-        return self.dropout(x)
-
-
-class AttentionPooling(nn.Module):
-    """Attention pooling thay cho last hidden của LSTM"""
-
-    def __init__(self, dim):
-        super().__init__()
-        self.attention = nn.Sequential(
-            nn.Linear(dim, dim // 4),
-            nn.Tanh(),
-            nn.Linear(dim // 4, 1)
-        )
-
-    def forward(self, x):
-        # x: (B, T, dim)
-        attn_weights = self.attention(x)  # (B, T, 1)
-        attn_weights = F.softmax(attn_weights, dim=1)
-        pooled = torch.sum(attn_weights * x, dim=1)  # (B, dim)
-        return pooled
-
-
-class VideoPreprocessor:
-    def __init__(self, model, target_frames=32, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
-        self.target_frames = target_frames
-        self.mean = mean
-        self.std = std
-        self.model = model
-
-    def _downsample_frames(self, frames):
-        num_frames = frames.shape[0]
-        if num_frames == self.target_frames:
-            return frames
-        elif num_frames < self.target_frames:
-            pad = self.target_frames - num_frames
-            return torch.cat([frames, frames[-1:].repeat(pad, 1, 1, 1)], dim=0)
-        else:
-            idx = torch.linspace(0, num_frames - 1, self.target_frames).long()
-            return frames[idx]
-
-    def _normalize(self, frames):
-        frames = frames.permute(0, 3, 1, 2).float() / 255.0
-        # Center crop to square to avoid distortion
-        _, _, H, W = frames.shape
-        min_side = min(H, W)
-        crop = T.CenterCrop(min_side)
-        frames = crop(frames)
-        # Resize to 224x224
-        resize = T.Resize((224, 224))
-        frames = resize(frames)
-        mean = torch.tensor(self.mean).view(1, 3, 1, 1)
-        std = torch.tensor(self.std).view(1, 3, 1, 1)
-        return (frames - mean) / std
-
-    def preprocess(self, video_path):
-        frames = self.model.read_video(video_path, update_bar=False)
-        frames = self._downsample_frames(frames)
-        frames = self._normalize(frames)
-        return frames.unsqueeze(0)  # Add batch dimension
 
 
 class ConvNeXtTransformer(nn.Module):
