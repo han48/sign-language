@@ -224,3 +224,4 @@ model/
 *.vsl
 results.csv
 .DS_Store
+*checkpoints/

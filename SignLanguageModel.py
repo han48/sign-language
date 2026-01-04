@@ -504,7 +504,7 @@ class ConvNeXtTransformer(nn.Module):
                     print(f"Error processing {video_file}: {e}")
 
         # Save to CSV
-        with open(f"{save_directory}/{output_csv}", mode='w', newline='', encoding='utf-8') as f:
+        with open(f"{save_directory}{output_csv}", mode='w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(['video_name', 'label'])
             writer.writerows(predictions)
@@ -560,7 +560,7 @@ class ConvNeXtTransformer(nn.Module):
 
         os.makedirs('checkpoints', exist_ok=True)
         checkpoint_files = glob.glob(
-            f'{save_directory}/checkpoints/checkpoint_epoch_*.pth')
+            f'{save_directory}checkpoints/checkpoint_epoch_*.pth')
         if len(checkpoint_files) <= max_checkpoints:
             return
 
@@ -598,7 +598,7 @@ class ConvNeXtTransformer(nn.Module):
         start_epoch = 0
         best_f1 = 0.0
         if resume_epoch is not None:
-            checkpoint_path = f'{save_directory}/checkpoints/checkpoint_epoch_{resume_epoch}.pth'
+            checkpoint_path = f'{save_directory}checkpoints/checkpoint_epoch_{resume_epoch}.pth'
             if os.path.exists(checkpoint_path):
                 print(f"Loading checkpoint from {checkpoint_path}")
                 checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -621,7 +621,7 @@ class ConvNeXtTransformer(nn.Module):
         )
 
         # Check if results.csv exists, if not, write header
-        results_file = f'{save_directory}/results.csv'
+        results_file = f'{save_directory}results.csv'
         file_exists = os.path.exists(results_file)
         with open(results_file, mode='a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -653,7 +653,7 @@ class ConvNeXtTransformer(nn.Module):
                 ])
 
             # Always save checkpoint with epoch index
-            os.makedirs(f'{save_directory}/checkpoints', exist_ok=True)
+            os.makedirs(f'{save_directory}checkpoints', exist_ok=True)
             checkpoint = {
                 'epoch': (epoch + 1),
                 'model_state_dict': model.state_dict(),
@@ -670,7 +670,7 @@ class ConvNeXtTransformer(nn.Module):
                     "Processing temporal blocks",
                 ]
             }
-            checkpoint_path = f'{save_directory}/checkpoints/checkpoint_epoch_{epoch+1}.pth'
+            checkpoint_path = f'{save_directory}checkpoints/checkpoint_epoch_{epoch+1}.pth'
             torch.save(checkpoint, checkpoint_path)
             print(f"Checkpoint saved: {checkpoint_path}")
 
@@ -681,7 +681,7 @@ class ConvNeXtTransformer(nn.Module):
             if val_metrics['f1'] > best_f1:
                 best_f1 = val_metrics['f1']
                 # Also save as best_model.pth
-                torch.save(checkpoint, f"{save_directory}/{save_path}")
+                torch.save(checkpoint, f"{save_directory}{save_path}")
                 print(f"✓ Best model saved with F1: {best_f1:.2f}%")
 
         return model
@@ -1437,7 +1437,7 @@ class KeypointTransformer(nn.Module):
 
         os.makedirs('mp_checkpoints', exist_ok=True)
         checkpoint_files = glob.glob(
-            f'{save_directory}/mp_checkpoints/checkpoint_epoch_*.pth')
+            f'{save_directory}mp_checkpoints/checkpoint_epoch_*.pth')
         if len(checkpoint_files) <= max_checkpoints:
             return
 
@@ -1560,15 +1560,21 @@ class KeypointTransformer(nn.Module):
         return total_loss / len(dataloader), {'precision': precision*100, 'recall': recall*100, 'f1': f1*100}
 
     def train_keypoint_model(self, train_loader, val_loader,
-                             num_epochs=20, lr=1e-4, device='cuda', save_path='best_mp_model.pth', resume_epoch=None, max_checkpoints=None, save_directory=""):
+                             num_epochs=20, lr=1e-4, device='cuda', save_path='best_mp_model.pth', label_mapping_path='dataset/label_mapping.json', resume_epoch=None, max_checkpoints=None, save_directory=""):
         """Full training loop for keypoints model"""
         model = self.to(device)
+
+        label_mapping_file = label_mapping_path
+        label_mapping = {}
+        if label_mapping_file.endswith('.json'):
+            with open(label_mapping_file, 'r', encoding='utf-8') as f:
+                label_mapping = json.load(f)
 
         # Resume from checkpoint if provided
         start_epoch = 0
         best_f1 = 0.0
         if resume_epoch is not None:
-            checkpoint_path = f'{save_directory}/mp_checkpoints/mp_checkpoint_epoch_{resume_epoch}.pth'
+            checkpoint_path = f'{save_directory}mp_checkpoints/mp_checkpoint_epoch_{resume_epoch}.pth'
             if os.path.exists(checkpoint_path):
                 print(f"Loading checkpoint from {checkpoint_path}")
                 checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -1623,7 +1629,7 @@ class KeypointTransformer(nn.Module):
                 ])
 
             # Always save checkpoint with epoch index
-            os.makedirs(f'{save_directory}/mp_checkpoints', exist_ok=True)
+            os.makedirs(f'{save_directory}mp_checkpoints', exist_ok=True)
             checkpoint = {
                 'epoch': (epoch + 1),
                 'model_state_dict': model.state_dict(),
@@ -1640,7 +1646,7 @@ class KeypointTransformer(nn.Module):
                     "Processing temporal blocks",
                 ]
             }
-            checkpoint_path = f'{save_directory}/mp_checkpoints/mp_checkpoint_epoch_{epoch+1}.pth'
+            checkpoint_path = f'{save_directory}mp_checkpoints/mp_checkpoint_epoch_{epoch+1}.pth'
             torch.save(checkpoint, checkpoint_path)
             print(f"Checkpoint saved: {checkpoint_path}")
 
@@ -1650,7 +1656,7 @@ class KeypointTransformer(nn.Module):
             if val_metrics['f1'] > best_f1:
                 best_f1 = val_metrics['f1']
                 # Also save as best_mp_model.pth
-                torch.save(checkpoint, f"{save_directory}/{save_path}")
+                torch.save(checkpoint, f"{save_directory}{save_path}")
                 print(f"✓ Best model saved with F1: {best_f1:.2f}%")
 
         return model
@@ -1667,7 +1673,55 @@ class KeypointTransformer(nn.Module):
 
         return [frames_keypoints[i] for i in indices.tolist()]
 
-    def predict_sign_language(self, video_path, device='cuda', show=False, block_durations=None, confidence_threshold=0.0, target_frames=16, block_duration_for_summary=1):
+    def read_video_and_extract_all_keypoints(self, video_path, pose_model, hand_model, pose_name, hand_name, target_frames=16, show=False):
+        """Read video and extract keypoints for all frames"""
+        cap = cv2.VideoCapture(video_path)
+        frames_keypoints = []
+        frame_count = 0
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps == 0:
+            fps = 30  # Default fallback
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            keypoints, pose_results, hands_results = self.extract_keypoints_from_frame(
+                frame, pose_model, hand_model, pose_name, hand_name)
+            frames_keypoints.append(keypoints)
+            frame_count += 1
+
+            if show:
+                mp_pose = mp.solutions.pose
+                mp_hands = mp.solutions.hands
+                mp_drawing = mp.solutions.drawing_utils
+                frame_copy = frame.copy()
+                # Draw pose
+                if pose_name == 'default' and pose_results and pose_results.pose_landmarks:
+                    mp_drawing.draw_landmarks(
+                        frame_copy, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                elif pose_name != 'default' and pose_results and pose_results.pose_landmarks:
+                    pass  # Skip drawing for Tasks API for now
+
+                # Draw hands
+                if hand_name == 'default' and hands_results and hands_results.multi_hand_landmarks:
+                    for hand_landmarks in hands_results.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(
+                            frame_copy, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                elif hand_name != 'default' and hands_results and hands_results.hand_landmarks:
+                    pass  # Skip drawing for Tasks API for now
+
+                cv2.imshow('MediaPipe Keypoints', frame_copy)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+        cap.release()
+
+        if len(frames_keypoints) == 0:
+            raise ValueError(f"Could not extract keypoints from {video_path}")
+
+        return frames_keypoints, fps
+
+    def predict_sign_language(self, video_path, device='cuda', show=False, block_durations=None, confidence_threshold=0.0, target_frames=16, block_duration_for_summary=1, debug=False):
         """Predict sign language from video using keypoints with temporal block analysis
 
         Args:
@@ -1695,7 +1749,7 @@ class KeypointTransformer(nn.Module):
 
         # Extract keypoints with FPS
         print(f"Extracting keypoints from {video_path}...")
-        frames_keypoints_all, fps = self.read_video_and_extract_keypoints(
+        frames_keypoints_all, fps = self.read_video_and_extract_all_keypoints(
             video_path, pose_model, hands_model, 'default', 'default', target_frames=target_frames, show=show)
         total_frames = len(frames_keypoints_all)
         print(f"Total frames: {total_frames}, FPS: {fps}")

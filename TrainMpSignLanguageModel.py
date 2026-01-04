@@ -109,9 +109,11 @@ if __name__ == '__main__':
         num_epochs=100,
         lr=1e-4,
         device='cuda',
+        label_mapping_path=f'{dataset_path}/label_mapping.json',
         save_path='best_mp_model.pth',
         resume_epoch=args.resume,
-        max_checkpoints=args.max_checkpoints
+        max_checkpoints=args.max_checkpoints,
+        save_directory=save_directory,
     )
 
     # Export public result

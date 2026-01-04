@@ -11,8 +11,6 @@ if __name__ == '__main__':
         "video_path", help="Path to the sign language video file.")
     parser.add_argument("--model_path", default="models/abc_vsl.pth",
                         help="Path to the trained model file.")
-    parser.add_argument("--label_mapping_path", default="dataset/label_mapping.json",
-                        help="Path to the label mapping file (JSON preferred, PKL fallback).")
     parser.add_argument("--device", default=None,
                         help="Device to run the model on (cuda, cpu, or auto-detect if not specified).")
     parser.add_argument("--window_size", type=int, default=16,
