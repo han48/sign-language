@@ -1,4 +1,5 @@
 import os
+import pickle
 import cv2
 import csv
 import json
@@ -23,6 +24,14 @@ import warnings
 warnings.filterwarnings('ignore')
 
 TARGET_FRAMES = 16
+
+
+def convert_pickle_to_json(src_path='dataset/label_mapping.pkl', dest_path='dataset/label_mapping.json'):
+    with open(src_path, 'rb') as f:
+        data = pickle.load(f)
+
+    with open(dest_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 
 class VideoAugmentation:
@@ -1437,7 +1446,7 @@ class KeypointTransformer(nn.Module):
 
         os.makedirs('mp_checkpoints', exist_ok=True)
         checkpoint_files = glob.glob(
-            f'{save_directory}mp_checkpoints/checkpoint_epoch_*.pth')
+            f'{save_directory}mp_checkpoints/mp_checkpoint_epoch_*.pth')
         if len(checkpoint_files) <= max_checkpoints:
             return
 
@@ -1673,7 +1682,7 @@ class KeypointTransformer(nn.Module):
 
         return [frames_keypoints[i] for i in indices.tolist()]
 
-    def read_video_and_extract_all_keypoints(self, video_path, pose_model, hand_model, pose_name, hand_name, target_frames=16, show=False):
+    def read_video_and_extract_all_keypoints(self, video_path, pose_model, hand_model, pose_name, hand_name, target_fps=16, show=False):
         """Read video and extract keypoints for all frames"""
         cap = cv2.VideoCapture(video_path)
         frames_keypoints = []
@@ -1681,38 +1690,51 @@ class KeypointTransformer(nn.Module):
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps == 0:
             fps = 30  # Default fallback
+
+        # Calculate sampling interval for reframing
+        if target_fps < fps:
+            sample_interval = fps / target_fps
+            next_sample = 0.0
+        else:
+            sample_interval = 1.0
+            next_sample = 0.0
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            keypoints, pose_results, hands_results = self.extract_keypoints_from_frame(
-                frame, pose_model, hand_model, pose_name, hand_name)
-            frames_keypoints.append(keypoints)
-            frame_count += 1
 
-            if show:
-                mp_pose = mp.solutions.pose
-                mp_hands = mp.solutions.hands
-                mp_drawing = mp.solutions.drawing_utils
-                frame_copy = frame.copy()
-                # Draw pose
-                if pose_name == 'default' and pose_results and pose_results.pose_landmarks:
-                    mp_drawing.draw_landmarks(
-                        frame_copy, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-                elif pose_name != 'default' and pose_results and pose_results.pose_landmarks:
-                    pass  # Skip drawing for Tasks API for now
+            if frame_count >= next_sample:
+                keypoints, pose_results, hands_results = self.extract_keypoints_from_frame(
+                    frame, pose_model, hand_model, pose_name, hand_name)
+                frames_keypoints.append(keypoints)
+                next_sample += sample_interval
 
-                # Draw hands
-                if hand_name == 'default' and hands_results and hands_results.multi_hand_landmarks:
-                    for hand_landmarks in hands_results.multi_hand_landmarks:
+                if show:
+                    mp_pose = mp.solutions.pose
+                    mp_hands = mp.solutions.hands
+                    mp_drawing = mp.solutions.drawing_utils
+                    frame_copy = frame.copy()
+                    # Draw pose
+                    if pose_name == 'default' and pose_results and pose_results.pose_landmarks:
                         mp_drawing.draw_landmarks(
-                            frame_copy, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                elif hand_name != 'default' and hands_results and hands_results.hand_landmarks:
-                    pass  # Skip drawing for Tasks API for now
+                            frame_copy, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                    elif pose_name != 'default' and pose_results and pose_results.pose_landmarks:
+                        pass  # Skip drawing for Tasks API for now
 
-                cv2.imshow('MediaPipe Keypoints', frame_copy)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                    # Draw hands
+                    if hand_name == 'default' and hands_results and hands_results.multi_hand_landmarks:
+                        for hand_landmarks in hands_results.multi_hand_landmarks:
+                            mp_drawing.draw_landmarks(
+                                frame_copy, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    elif hand_name != 'default' and hands_results and hands_results.hand_landmarks:
+                        pass  # Skip drawing for Tasks API for now
+
+                    cv2.imshow('MediaPipe Keypoints', frame_copy)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+
+            frame_count += 1
 
         cap.release()
 
@@ -1721,7 +1743,7 @@ class KeypointTransformer(nn.Module):
 
         return frames_keypoints, fps
 
-    def predict_sign_language(self, video_path, device='cuda', show=False, block_durations=None, confidence_threshold=0.0, target_frames=16, block_duration_for_summary=1, debug=False):
+    def predict_sign_language(self, video_path, device='cuda', show=False, block_durations=None, confidence_threshold=0.0, target_fps=16, block_duration_for_summary=1, debug=False):
         """Predict sign language from video using keypoints with temporal block analysis
 
         Args:
@@ -1750,9 +1772,11 @@ class KeypointTransformer(nn.Module):
         # Extract keypoints with FPS
         print(f"Extracting keypoints from {video_path}...")
         frames_keypoints_all, fps = self.read_video_and_extract_all_keypoints(
-            video_path, pose_model, hands_model, 'default', 'default', target_frames=target_frames, show=show)
+            video_path, pose_model, hands_model, 'default', 'default', target_fps=target_fps, show=show)
+        
         total_frames = len(frames_keypoints_all)
         print(f"Total frames: {total_frames}, FPS: {fps}")
+        fps = target_fps
 
         # Default block durations
         if block_durations is None:
@@ -1765,13 +1789,12 @@ class KeypointTransformer(nn.Module):
         all_predictions = []
         total_blocks = sum((total_frames - int(fps * d) + 1) //
                            shift_frames + 1 for d in block_durations if int(fps * d) > 0)
-
         print(f"Processing {total_blocks} temporal blocks...")
         with tqdm(total=total_blocks, desc="Temporal block analysis") as pbar:
             for duration in block_durations:
                 frames_per_block = int(fps * duration)
                 if frames_per_block == 0:
-                    frames_per_block = 30 * duration  # Fallback
+                    frames_per_block = fps * duration  # Fallback
 
                 for start in range(0, total_frames - frames_per_block + 1, shift_frames):
                     end = min(start + frames_per_block, total_frames)
@@ -1782,9 +1805,9 @@ class KeypointTransformer(nn.Module):
                     block_keypoints = frames_keypoints_all[start:end]
 
                     # Downsample to TARGET_FRAMES if needed
-                    if len(block_keypoints) != TARGET_FRAMES:
+                    if len(block_keypoints) != target_fps:
                         block_keypoints = self.downsample_keypoints(
-                            block_keypoints, TARGET_FRAMES)
+                            block_keypoints, target_fps)
 
                     # Convert to tensor and predict
                     keypoints_tensor = torch.tensor(

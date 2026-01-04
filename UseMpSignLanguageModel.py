@@ -34,7 +34,7 @@ if __name__ == '__main__':
         block_durations=[1, 2, 3],
         confidence_threshold=args.confidence_threshold,
         block_duration_for_summary=args.block_duration_for_summary,
-        target_frames=args.target_fps, 
+        target_fps=args.target_fps, 
         debug=args.debug,
     )
     print(
