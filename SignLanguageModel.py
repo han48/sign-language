@@ -1,29 +1,280 @@
 import os
-import pickle
 import cv2
 import csv
 import json
 import math
 import glob
-import torch
+import pickle
+import shutil
 import random
 import numpy as np
 import unicodedata
-import torch.nn as nn
 from tqdm import tqdm
-import mediapipe as mp
-from torch.optim import AdamW
-from torchvision import models
-import torch.nn.functional as F
-import mediapipe.tasks as mp_tasks
-from torchvision import transforms as T
-from collections import Counter, OrderedDict
-from torch.utils.data import Dataset, WeightedRandomSampler
-from sklearn.metrics import precision_recall_fscore_support
+from pathlib import Path
+from collections import Counter, OrderedDict, defaultdict
 import warnings
+
+import mediapipe as mp
+import mediapipe.tasks as mp_tasks
+
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+import torch.nn.functional as F
+from torch.utils.data import Dataset, WeightedRandomSampler
+
+from torchvision import models
+from torchvision import transforms as T
+
+from sklearn.metrics import precision_recall_fscore_support
+
 warnings.filterwarnings('ignore')
 
 TARGET_FRAMES = 16
+
+
+def organize_dataset():
+    # Define paths
+    json_file = "data/dictionary.json"
+    base_output_dir = "dataset_v2/train"
+
+    # Load the JSON file
+    with open(json_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    # Create the base output directory if it doesn't exist
+    os.makedirs(base_output_dir, exist_ok=True)
+
+    # Process each entry in the JSON
+    for entry in data:
+        word = entry.get('word')
+        local_video = entry.get('local_video')
+        _id = entry.get('_id')
+
+        if not word or not local_video or not _id:
+            print(f"Skipping entry with missing data: {entry}")
+            continue
+
+        # Create the word folder
+        word_folder = os.path.join(base_output_dir, word)
+        os.makedirs(word_folder, exist_ok=True)
+
+        # Check if the source video file exists
+        if not os.path.exists(local_video):
+            print(f"Warning: Source file not found: {local_video}")
+            continue
+
+        # Get the file extension from the original file
+        file_extension = Path(local_video).suffix
+
+        # Create the new filename based on _id and extension
+        new_filename = f"{_id}{file_extension}"
+        new_filepath = os.path.join(word_folder, new_filename)
+
+        # Copy the file if it doesn't already exist
+        if not os.path.exists(new_filepath):
+            try:
+                shutil.copy2(local_video, new_filepath)
+                print(f"Copied: {local_video} -> {new_filepath}")
+            except Exception as e:
+                print(f"Error copying {local_video} to {new_filepath}: {e}")
+        else:
+            print(f"File already exists: {new_filepath}")
+
+    print("Dataset organization completed!")
+
+
+def create_label_mapping():
+    """
+    Load data from dataset/train folder and create a label mapping file
+    similar to dataset/label_mapping.json
+    """
+    train_dir = "dataset/train"
+    output_file = "dataset/label_mapping.json"
+
+    # Get all folder names in dataset/train
+    if not os.path.exists(train_dir):
+        print(f"Error: {train_dir} directory not found!")
+        return
+
+    # Get list of all folders (words/labels)
+    labels = []
+    for item in os.listdir(train_dir):
+        item_path = os.path.join(train_dir, item)
+        if os.path.isdir(item_path):
+            labels.append(item)
+
+    # Sort labels alphabetically
+    labels.sort()
+
+    # Create mapping: label -> index
+    label_mapping = {label: idx for idx, label in enumerate(labels)}
+
+    # Save to JSON file
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(label_mapping, f, ensure_ascii=False, indent=4)
+
+    print(f"Label mapping created successfully!")
+    print(f"Total labels: {len(labels)}")
+    print(f"Saved to: {output_file}")
+    print(f"\nFirst 10 labels:")
+    for i, label in enumerate(labels[:10]):
+        print(f"  {i}: {label}")
+
+
+def get_video_info(video_path):
+    """
+    Extract video information: fps, total frames, duration, file size
+    """
+    try:
+        cap = cv2.VideoCapture(video_path)
+
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Calculate duration in seconds
+        if fps > 0:
+            duration = frame_count / fps
+        else:
+            duration = 0
+
+        cap.release()
+
+        # Get file size in bytes
+        file_size = os.path.getsize(video_path)
+
+        return {
+            "fps": fps,
+            "frame_count": frame_count,
+            "duration": round(duration, 2),  # seconds
+            "file_size": file_size  # bytes
+        }
+    except Exception as e:
+        print(f"Error processing {video_path}: {e}")
+        return None
+
+
+def create_dataset_statistics():
+    """
+    Create statistics for all videos in dataset/train
+    """
+    train_dir = "dataset/train"
+    output_file = "dataset/train_statistics.json"
+
+    if not os.path.exists(train_dir):
+        print(f"Error: {train_dir} directory not found!")
+        return
+
+    statistics = {}
+    total_videos = 0
+    total_duration = 0
+    total_size = 0
+
+    # Iterate through each label folder
+    for label in sorted(os.listdir(train_dir)):
+        label_path = os.path.join(train_dir, label)
+
+        if not os.path.isdir(label_path):
+            continue
+
+        # Initialize label statistics
+        label_stats = {
+            "total_videos": 0,
+            "total_duration": 0,  # seconds
+            "total_size": 0,  # bytes
+            "fps_distribution": {},
+            "videos": []
+        }
+
+        fps_count = defaultdict(int)
+
+        # Process all video files in the label folder
+        for video_file in os.listdir(label_path):
+            video_path = os.path.join(label_path, video_file)
+
+            # Check if it's a video file
+            if not os.path.isfile(video_path):
+                continue
+
+            video_info = get_video_info(video_path)
+            if video_info is None:
+                continue
+
+            # Round fps to 2 decimal places for grouping
+            fps_key = round(video_info["fps"], 2)
+            fps_count[fps_key] += 1
+
+            # Update label statistics
+            label_stats["total_videos"] += 1
+            label_stats["total_duration"] += video_info["duration"]
+            label_stats["total_size"] += video_info["file_size"]
+
+            # Store individual video info
+            label_stats["videos"].append({
+                "name": video_file,
+                "fps": video_info["fps"],
+                "frame_count": video_info["frame_count"],
+                "duration": video_info["duration"],
+                "file_size": video_info["file_size"]
+            })
+
+            # Update global statistics
+            total_videos += 1
+            total_duration += video_info["duration"]
+            total_size += video_info["file_size"]
+
+        # Convert fps_count to string keys for JSON serialization
+        label_stats["fps_distribution"] = {
+            str(fps): count for fps, count in fps_count.items()}
+
+        # Round total duration
+        label_stats["total_duration"] = round(label_stats["total_duration"], 2)
+
+        # Only add label if it has videos
+        if label_stats["total_videos"] > 0:
+            statistics[label] = label_stats
+
+    # Create final statistics object
+    final_stats = {
+        "summary": {
+            "total_labels": len(statistics),
+            "total_videos": total_videos,
+            "total_duration_seconds": round(total_duration, 2),
+            "total_duration_hours": round(total_duration / 3600, 2),
+            "total_size_bytes": total_size,
+            "total_size_mb": round(total_size / (1024 * 1024), 2),
+            "total_size_gb": round(total_size / (1024 * 1024 * 1024), 2)
+        },
+        "labels": statistics
+    }
+
+    # Save to JSON file
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(final_stats, f, ensure_ascii=False, indent=2)
+
+    print("Dataset statistics created successfully!")
+    print(f"\n{'='*60}")
+    print("SUMMARY")
+    print(f"{'='*60}")
+    print(f"Total labels: {final_stats['summary']['total_labels']}")
+    print(f"Total videos: {final_stats['summary']['total_videos']}")
+    print(f"Total duration: {final_stats['summary']['total_duration_hours']} hours "
+          f"({final_stats['summary']['total_duration_seconds']} seconds)")
+    print(f"Total size: {final_stats['summary']['total_size_gb']} GB "
+          f"({final_stats['summary']['total_size_mb']} MB)")
+    print(f"\nSaved to: {output_file}")
+
+    # Print sample label statistics
+    print(f"\n{'='*60}")
+    print("SAMPLE LABEL STATISTICS (First 5 labels)")
+    print(f"{'='*60}")
+    for i, (label, stats) in enumerate(list(statistics.items())[:5]):
+        print(f"\n{label}:")
+        print(f"  Videos: {stats['total_videos']}")
+        print(f"  Duration: {stats['total_duration']} seconds")
+        print(f"  Size: {round(stats['total_size'] / (1024*1024), 2)} MB")
+        print(f"  FPS Distribution: {stats['fps_distribution']}")
 
 
 def convert_pickle_to_json(src_path='dataset/label_mapping.pkl', dest_path='dataset/label_mapping.json'):
@@ -941,7 +1192,6 @@ class ConvNeXtTransformer(nn.Module):
         else:
             state = ckpt
 
-        from collections import OrderedDict
         if any(k.startswith("module.") for k in state.keys()):
             new_state = OrderedDict((k.replace("module.", "", 1), v)
                                     for k, v in state.items())

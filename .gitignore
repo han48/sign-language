@@ -219,6 +219,7 @@ datasets/
 dataset/
 models/
 model/
+data/
 
 *.pth
 *.vsl
