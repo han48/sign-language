@@ -17,7 +17,7 @@ if __name__ == '__main__':
                         help="Window size for sliding window prediction.")
     parser.add_argument("--stride", type=int, default=8,
                         help="Stride for sliding window prediction.")
-    parser.add_argument("--confidence_threshold", type=float, default=0.5,
+    parser.add_argument("--confidence_threshold", type=float, default=0.2,
                         help="Minimum confidence threshold to consider predictions (0.0 to 1.0).")
     parser.add_argument("--target_fps", type=float, default=16,
                         help="Target FPS to resample video frames to match training data (e.g., 10.0).")
@@ -38,7 +38,13 @@ if __name__ == '__main__':
 
     def fn_push(status):
         with open(file_name, "w", encoding="utf-8") as f:
-            content = f"{model.predict_steps.index(status[0]) + 1},{len(model.predict_steps)},{status[0]},{status[1]},{status[2]}"
+            text = ""
+            confidence = 0
+            if len(status) > 3:
+                unique_predictions = model.summarize_best_result(status[3], args.block_duration_for_summary)
+                text = " ".join([k for k, _ in unique_predictions])
+                confidence = sum(v for _, v in unique_predictions) / len(unique_predictions) if unique_predictions else float('inf')
+            content = f"{model.predict_steps.index(status[0]) + 1},{len(model.predict_steps)},{status[0]},{status[1]},{status[2]},{text},{confidence:.2f}"
             f.write(content)
 
     text, confidence, predicted_labels = model.predict_sign_language_sentence(

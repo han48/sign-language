@@ -422,6 +422,7 @@ class ConvNeXtTransformer(nn.Module):
                         break
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     frames.append(frame)
+                    pbar.update(1)
                     if fn_push is not None:
                         fn_push(["Reading video frames", pbar.n, total_frames])
         else:
@@ -695,7 +696,51 @@ class ConvNeXtTransformer(nn.Module):
 
         return model
 
+    def summarize_best_result(self, all_predictions, block_duration_for_summary, debug=True):
+        if all_predictions:
+            filtered_predictions = [
+                pred for pred in all_predictions if pred[4] == block_duration_for_summary]
+            if filtered_predictions:
+                label_counts = Counter(
+                    [p for p, c, _, _, _ in filtered_predictions])
+                label_avg_conf = {}
+                for p in label_counts:
+                    confs = [c for pred, c, _, _,
+                             _ in filtered_predictions if pred == p]
+                    label_avg_conf[p] = sum(confs) / len(confs)
+                seen = OrderedDict()
+                for p, c, s, e, d in filtered_predictions:
+                    if p not in seen:
+                        # count and first start time
+                        seen[p] = (label_counts[p], s)
+                # Find the maximum count
+                if seen:
+                    max_count = max(v[0] for v in seen.values())
+                    # Filter labels with count >= 2 (to keep significant ones)
+                    candidate_labels = [(p, v)
+                                        for p, v in seen.items() if v[0] >= 2]
+                    # Sort by first appearance time ascending, then by average confidence descending
+                    sorted_labels = sorted(candidate_labels, key=lambda x: (
+                        x[1][1], -label_avg_conf[x[0]]))
+                    unique_predictions = [(p, label_avg_conf[p])
+                                          for p, _ in sorted_labels]
+                else:
+                    unique_predictions = []
+                if debug:
+                    print(
+                        f"Best summary (majority vote with avg confidence from {block_duration_for_summary}s blocks): {' '.join([f'{p}({c:.2f})' for p, c in unique_predictions])}")
+            else:
+                unique_predictions = []
+                if debug:
+                    print(
+                        f"No predictions from {block_duration_for_summary}s blocks.")
+        else:
+            unique_predictions = []
+
+        return unique_predictions
+
     def predict_sign_language_sentence(self, video_path, fn_push=None, window_size=16, stride=8, confidence_threshold=0.0, block_durations=None, target_fps=None, block_duration_for_summary=1, show=False, debug=False):
+        model = self.to(self.device)
 
         # Read and preprocess entire video
         frames, fps = self.read_video(video_path, fn_push=fn_push)
@@ -850,7 +895,7 @@ class ConvNeXtTransformer(nn.Module):
                     pbar.update(1)
                     if fn_push is not None:
                         fn_push(["Processing temporal blocks",
-                                pbar.n, total_blocks])
+                                pbar.n, total_blocks, all_predictions])
         # Print all predictions
         if debug:
             print("All predictions from temporal blocks:")
@@ -858,45 +903,8 @@ class ConvNeXtTransformer(nn.Module):
                 print(
                     f"{i+1}: {label} ({conf:.2f}) [{start_t:.1f}-{end_t:.1f}s] ({dur}s block)")
         # Summarize best result using majority vote with average confidence from specified block duration
-        if all_predictions:
-            filtered_predictions = [
-                pred for pred in all_predictions if pred[4] == block_duration_for_summary]
-            if filtered_predictions:
-                label_counts = Counter(
-                    [p for p, c, _, _, _ in filtered_predictions])
-                label_avg_conf = {}
-                for p in label_counts:
-                    confs = [c for pred, c, _, _,
-                             _ in filtered_predictions if pred == p]
-                    label_avg_conf[p] = sum(confs) / len(confs)
-                seen = OrderedDict()
-                for p, c, s, e, d in filtered_predictions:
-                    if p not in seen:
-                        # count and first start time
-                        seen[p] = (label_counts[p], s)
-                # Find the maximum count
-                if seen:
-                    max_count = max(v[0] for v in seen.values())
-                    # Filter labels with count >= 2 (to keep significant ones)
-                    candidate_labels = [(p, v)
-                                        for p, v in seen.items() if v[0] >= 2]
-                    # Sort by first appearance time ascending, then by average confidence descending
-                    sorted_labels = sorted(candidate_labels, key=lambda x: (
-                        x[1][1], -label_avg_conf[x[0]]))
-                    unique_predictions = [(p, label_avg_conf[p])
-                                          for p, _ in sorted_labels]
-                else:
-                    unique_predictions = []
-                if debug:
-                    print(
-                        f"Best summary (majority vote with avg confidence from {block_duration_for_summary}s blocks): {' '.join([f'{p}({c:.2f})' for p, c in unique_predictions])}")
-            else:
-                unique_predictions = []
-                if debug:
-                    print(
-                        f"No predictions from {block_duration_for_summary}s blocks.")
-        else:
-            unique_predictions = []
+        unique_predictions = self.summarize_best_result(
+            all_predictions, block_duration_for_summary, debug=debug)
 
         if show:
             cv2.destroyAllWindows()
@@ -1773,7 +1781,7 @@ class KeypointTransformer(nn.Module):
         print(f"Extracting keypoints from {video_path}...")
         frames_keypoints_all, fps = self.read_video_and_extract_all_keypoints(
             video_path, pose_model, hands_model, 'default', 'default', target_fps=target_fps, show=show)
-        
+
         total_frames = len(frames_keypoints_all)
         print(f"Total frames: {total_frames}, FPS: {fps}")
         fps = target_fps
