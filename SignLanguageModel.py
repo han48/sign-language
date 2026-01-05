@@ -1338,7 +1338,7 @@ class KeypointTransformer(nn.Module):
 
         return frames_keypoints, fps
 
-    def preprocess_keypoints(self, root_dir, label_to_idx_path, keypoints_cache_dir=None, show=False, force_recreate=False):
+    def preprocess_keypoints(self, root_dir, label_to_idx_path, keypoints_cache_dir=None, show=False, force_recreate=False, multiple_mp=False):
         """Preprocess all videos to extract keypoints and save to JSON cache"""
         if keypoints_cache_dir is None:
             keypoints_cache_dir = root_dir + '-json'
@@ -1350,9 +1350,17 @@ class KeypointTransformer(nn.Module):
             'NFC', k): v for k, v in label_mapping.items()}
 
         total_videos = 0
-        for pose_name in self.POSE_MODELS.keys():
+
+        if multiple_mp:
+            pose_keys = self.POSE_MODELS.keys()
+            hand_keys = self.HAND_MODELS.keys()
+        else:
+            pose_keys = ['default']
+            hand_keys = ['default']
+
+        for pose_name in pose_keys:
             pose_model = self.init_pose_model(pose_name)
-            for hand_name in self.HAND_MODELS.keys():
+            for hand_name in hand_keys:
                 hand_model = self.init_hand_model(hand_name)
                 for item in sorted(os.listdir(root_dir)):
                     path = os.path.join(root_dir, item)
