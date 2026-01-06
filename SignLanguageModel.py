@@ -1601,6 +1601,17 @@ class KeypointTransformer(nn.Module):
 
         total_videos = 0
 
+        count_videos = 0
+        done_videos = 0
+        for item in sorted(os.listdir(root_dir)):
+            path = os.path.join(root_dir, item)
+            if os.path.isdir(path):
+                label_folder = item
+                for video_file in os.listdir(path):
+                    count_videos += 1
+            elif os.path.isfile(path) and item.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+                count_videos += 1
+
         if multiple_mp:
             pose_keys = self.POSE_MODELS.keys()
             hand_keys = self.HAND_MODELS.keys()
@@ -1617,6 +1628,7 @@ class KeypointTransformer(nn.Module):
                     if os.path.isdir(path):
                         label_folder = item
                         for video_file in os.listdir(path):
+                            done_videos += 1
                             video_path = os.path.join(path, video_file)
                             # Create relative path for cache
                             relative_path = os.path.relpath(
@@ -1638,7 +1650,7 @@ class KeypointTransformer(nn.Module):
                                         json.dump(frames_keypoints, f)
                                     total_videos += 1
                                     print(
-                                        f"Processed {total_videos}: {video_file} with {pose_name} pose and {hand_name} hand")
+                                        f"[{done_videos}/{count_videos}] Processed {total_videos}: {video_file} with {pose_name} pose and {hand_name} hand")
                                 except Exception as e:
                                     print(
                                         f"Error processing {video_file} with {pose_name}/{hand_name}: {e}")
@@ -1646,6 +1658,7 @@ class KeypointTransformer(nn.Module):
                                 print(
                                     f"Cache exists for {video_file} with {pose_name}/{hand_name}, skipping")
                     elif os.path.isfile(path) and item.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+                        done_videos += 1
                         video_file = item
                         video_path = path
                         relative_path = item
@@ -1664,7 +1677,7 @@ class KeypointTransformer(nn.Module):
                                     json.dump(frames_keypoints, f)
                                 total_videos += 1
                                 print(
-                                    f"Processed {total_videos}: {video_file} with {pose_name} pose and {hand_name} hand")
+                                    f"[{done_videos}/{count_videos}] Processed {total_videos}: {video_file} with {pose_name} pose and {hand_name} hand")
                             except Exception as e:
                                 print(
                                     f"Error processing {video_file} with {pose_name}/{hand_name}: {e}")
