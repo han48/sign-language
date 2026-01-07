@@ -1330,16 +1330,16 @@ class KeypointTransformer(nn.Module):
 
         # Pose models: default, lite, heavy, full
         self.POSE_MODELS = {
-            'default': None,  # Use mp.solutions.pose
-            # 'lite': 'models/pose_landmarker_lite.task',
-            # 'heavy': 'models/pose_landmarker_heavy.task',
-            # 'full': 'models/pose_landmarker_full.task'
+            # 'default': None,  # Use mp.solutions.pose
+            'lite': 'models/pose_landmarker_lite.task',
+            'heavy': 'models/pose_landmarker_heavy.task',
+            'full': 'models/pose_landmarker_full.task'
         }
 
         # Hand models: default, hand_landmarker
         self.HAND_MODELS = {
-            'default': None,  # Use mp.solutions.hands
-            # 'hand_landmarker': 'models/hand_landmarker.task'
+            # 'default': None,  # Use mp.solutions.hands
+            'hand_landmarker': 'models/hand_landmarker.task'
         }
 
     def _init_weights(self):
@@ -1588,8 +1588,12 @@ class KeypointTransformer(nn.Module):
 
         return frames_keypoints, fps
 
-    def preprocess_keypoints(self, root_dir, label_to_idx_path, keypoints_cache_dir=None, show=False, force_recreate=False, multiple_mp=False):
-        """Preprocess all videos to extract keypoints and save to JSON cache"""
+    def preprocess_keypoints(self, root_dir, label_to_idx_path, keypoints_cache_dir=None, show=False, force_recreate=False, multiple_mp=False, num_workers=1):
+        """Preprocess all videos to extract keypoints and save to JSON cache.
+
+        New: `num_workers` controls parallel processing of videos per (pose, hand) pair.
+        If `num_workers` <= 1 the function runs sequentially (backwards-compatible).
+        """
         if keypoints_cache_dir is None:
             keypoints_cache_dir = root_dir + '-json'
         os.makedirs(keypoints_cache_dir, exist_ok=True)
@@ -1600,13 +1604,13 @@ class KeypointTransformer(nn.Module):
             'NFC', k): v for k, v in label_mapping.items()}
 
         total_videos = 0
+        error_files = []  # Track files that fail processing
 
+        # Count videos for progress reporting
         count_videos = 0
-        done_videos = 0
         for item in sorted(os.listdir(root_dir)):
             path = os.path.join(root_dir, item)
             if os.path.isdir(path):
-                label_folder = item
                 for video_file in os.listdir(path):
                     count_videos += 1
             elif os.path.isfile(path) and item.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
@@ -1615,59 +1619,53 @@ class KeypointTransformer(nn.Module):
         if multiple_mp:
             pose_keys = self.POSE_MODELS.keys()
             hand_keys = self.HAND_MODELS.keys()
+            count_videos = count_videos * len(list(pose_keys)) * len(list(hand_keys))
         else:
             pose_keys = ['default']
             hand_keys = ['default']
 
+        # Progress counter shared across all pose/hand combos
+        processed = {'count': 0}
+
+        # Local imports to avoid touching top-of-file imports
+        import math
+        import concurrent.futures
+        import threading
+
         for pose_name in pose_keys:
-            pose_model = self.init_pose_model(pose_name)
             for hand_name in hand_keys:
-                hand_model = self.init_hand_model(hand_name)
+                # Build a flat list of (video_path, cache_file, video_file, label) tasks
+                tasks = []
                 for item in sorted(os.listdir(root_dir)):
                     path = os.path.join(root_dir, item)
                     if os.path.isdir(path):
-                        label_folder = item
+                        label = item
                         for video_file in os.listdir(path):
-                            done_videos += 1
                             video_path = os.path.join(path, video_file)
-                            # Create relative path for cache
-                            relative_path = os.path.relpath(
-                                video_path, root_dir)
-                            base_name = relative_path.replace('.mp4', '').replace(
-                                '.avi', '').replace('.mov', '').replace('.mkv', '')
-
-                            cache_file = os.path.join(
-                                keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
-                            os.makedirs(os.path.dirname(
-                                cache_file), exist_ok=True)
-
-                            if force_recreate or not os.path.exists(cache_file):
-                                try:
-                                    frames_keypoints = self.read_video_and_extract_keypoints(
-                                        video_path, pose_model, hand_model, pose_name, hand_name, TARGET_FRAMES, show=show
-                                    )
-                                    with open(cache_file, 'w') as f:
-                                        json.dump(frames_keypoints, f)
-                                    total_videos += 1
-                                    print(
-                                        f"[{done_videos}/{count_videos}] Processed {total_videos}: {video_file} with {pose_name} pose and {hand_name} hand")
-                                except Exception as e:
-                                    print(
-                                        f"Error processing {video_file} with {pose_name}/{hand_name}: {e}")
-                            else:
-                                print(
-                                    f"Cache exists for {video_file} with {pose_name}/{hand_name}, skipping")
+                            relative_path = os.path.relpath(video_path, root_dir)
+                            base_name = relative_path.replace('.mp4', '').replace('.avi', '').replace('.mov', '').replace('.mkv', '')
+                            cache_file = os.path.join(keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
+                            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+                            tasks.append((video_path, cache_file, video_file, label))
                     elif os.path.isfile(path) and item.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
-                        done_videos += 1
                         video_file = item
                         video_path = path
-                        relative_path = item
-                        base_name = item.replace('.mp4', '').replace(
-                            '.avi', '').replace('.mov', '').replace('.mkv', '')
-                        cache_file = os.path.join(
-                            keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
+                        base_name = item.replace('.mp4', '').replace('.avi', '').replace('.mov', '').replace('.mkv', '')
+                        cache_file = os.path.join(keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
                         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+                        tasks.append((video_path, cache_file, video_file, "root"))
 
+                if not tasks:
+                    continue
+
+                # Sequential path: reuse one pair of models
+                if num_workers is None or int(num_workers) <= 1:
+                    pose_model = self.init_pose_model(pose_name)
+                    hand_model = self.init_hand_model(hand_name)
+                    for idx, (video_path, cache_file, video_file, label) in enumerate(tasks, start=1):
+                        # Update progress counter (counts attempted items)
+                        processed['count'] += 1
+                        curr = processed['count']
                         if force_recreate or not os.path.exists(cache_file):
                             try:
                                 frames_keypoints = self.read_video_and_extract_keypoints(
@@ -1676,17 +1674,87 @@ class KeypointTransformer(nn.Module):
                                 with open(cache_file, 'w') as f:
                                     json.dump(frames_keypoints, f)
                                 total_videos += 1
-                                print(
-                                    f"[{done_videos}/{count_videos}] Processed {total_videos}: {video_file} with {pose_name} pose and {hand_name} hand")
+                                print(f"[{curr}/{count_videos}] Processed {label}/{video_file} with {pose_name} pose and {hand_name} hand")
                             except Exception as e:
-                                print(
-                                    f"Error processing {video_file} with {pose_name}/{hand_name}: {e}")
+                                error_files.append((video_file, str(e), pose_name, hand_name))
+                                print(f"[{curr}/{count_videos}] Error processing {label}/{video_file} with {pose_name}/{hand_name}: {e}")
                         else:
-                            print(
-                                f"Cache exists for {video_file} with {pose_name}/{hand_name}, skipping")
+                            print(f"[{curr}/{count_videos}] Cache exists for {label}/{video_file} with {pose_name}/{hand_name}, skipping")
 
-        print(
-            f"Preprocessing complete. Total new videos processed: {total_videos}")
+                # Parallel path: split tasks among workers; each worker initializes its own models once
+                else:
+                    max_workers = max(1, int(num_workers))
+                    # Split tasks into roughly equal chunks per worker
+                    chunk_size = int(math.ceil(len(tasks) / max_workers))
+                    chunks = [tasks[i:i+chunk_size] for i in range(0, len(tasks), chunk_size)]
+                    lock = threading.Lock()
+
+                    def _worker(subtasks):
+                        processed_local = 0
+                        pose_model_w = self.init_pose_model(pose_name)
+                        hand_model_w = self.init_hand_model(hand_name)
+                        for video_path, cache_file, video_file, label in subtasks:
+                            with lock:
+                                processed['count'] += 1
+                                curr = processed['count']
+                            if force_recreate or not os.path.exists(cache_file):
+                                try:
+                                    frames_keypoints = self.read_video_and_extract_keypoints(
+                                        video_path, pose_model_w, hand_model_w, pose_name, hand_name, TARGET_FRAMES, show=show
+                                    )
+                                    with open(cache_file, 'w') as f:
+                                        json.dump(frames_keypoints, f)
+                                    processed_local += 1
+                                    with lock:
+                                        print(f"[{curr}/{count_videos}] Processed {label}/{video_file} with {pose_name} pose and {hand_name} hand")
+                                except Exception as e:
+                                    with lock:
+                                        error_files.append((video_file, str(e), pose_name, hand_name))
+                                        print(f"[{curr}/{count_videos}] Error processing {label}/{video_file} with {pose_name}/{hand_name}: {e}")
+                            else:
+                                with lock:
+                                    print(f"[{curr}/{count_videos}] Cache exists for {label}/{video_file} with {pose_name}/{hand_name}, skipping")
+                        return processed_local
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                        futures = [ex.submit(_worker, c) for c in chunks]
+                        for f in concurrent.futures.as_completed(futures):
+                            try:
+                                total_videos += f.result()
+                            except Exception as e:
+                                print(f"Worker failed: {e}")
+
+        # Validate JSON cache files (check for empty or all-zero content)
+        print("\nValidating cache files...")
+        validated_count = 0
+        for item in sorted(os.listdir(keypoints_cache_dir)):
+            cache_file = os.path.join(keypoints_cache_dir, item)
+            if os.path.isfile(cache_file) and cache_file.endswith('.json'):
+                try:
+                    with open(cache_file, 'r') as f:
+                        data = json.load(f)
+                    # Check if empty or all values are zeros
+                    if not data:
+                        error_files.append((item, "Cache is empty", "validation", "post-process"))
+                    elif not any(any(v != 0 for v in frame) for frame in data):
+                        error_files.append((item, "All keypoints are zero", "validation", "post-process"))
+                    else:
+                        validated_count += 1
+                except Exception as e:
+                    error_files.append((item, f"Invalid JSON: {str(e)}", "validation", "post-process"))
+
+        # Print summary
+        print(f"\nPreprocessing complete. Total new videos processed: {total_videos}")
+        if error_files:
+            print(f"\nWarning: {len(error_files)} files failed or invalid:")
+            for video_file, error_msg, *rest in error_files:
+                if rest:
+                    pose_hand = f" [{rest[0]}/{rest[1]}]" if len(rest) >= 2 else ""
+                else:
+                    pose_hand = ""
+                print(f"  - {video_file}{pose_hand}: {error_msg}")
+        else:
+            print("\nAll files processed successfully!")
 
     def create_balanced_sampler(self, dataset):
         """Create balanced sampler for imbalanced dataset"""
