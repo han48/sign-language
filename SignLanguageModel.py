@@ -1330,7 +1330,7 @@ class KeypointTransformer(nn.Module):
 
         # Pose models: default, lite, heavy, full
         self.POSE_MODELS = {
-            # 'default': None,  # Use mp.solutions.pose
+            'default': 'models/pose_landmarker_lite.task',
             'lite': 'models/pose_landmarker_lite.task',
             'heavy': 'models/pose_landmarker_heavy.task',
             'full': 'models/pose_landmarker_full.task'
@@ -1338,7 +1338,7 @@ class KeypointTransformer(nn.Module):
 
         # Hand models: default, hand_landmarker
         self.HAND_MODELS = {
-            # 'default': None,  # Use mp.solutions.hands
+            'default': 'models/hand_landmarker.task',
             'hand_landmarker': 'models/hand_landmarker.task'
         }
 
@@ -1371,8 +1371,17 @@ class KeypointTransformer(nn.Module):
 
     def init_pose_model(self, model_name):
         if model_name == 'default':
-            mp_pose = mp.solutions.pose
-            return mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5)
+            try:
+                mp_pose = mp.solutions.pose
+                return mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5)
+            except:
+                base_options = mp_tasks.BaseOptions(
+                    model_asset_path=self.POSE_MODELS[model_name])
+                options = mp_tasks.vision.PoseLandmarkerOptions(
+                    base_options=base_options,
+                    running_mode=mp_tasks.vision.RunningMode.IMAGE  # Use IMAGE mode
+                )
+                return mp_tasks.vision.PoseLandmarker.create_from_options(options)
         else:
             base_options = mp_tasks.BaseOptions(
                 model_asset_path=self.POSE_MODELS[model_name])
@@ -1384,10 +1393,10 @@ class KeypointTransformer(nn.Module):
 
     def init_hand_model(self, model_name):
         if model_name == 'default':
-            mp_hands = mp.solutions.hands
-            return mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
-        else:
             try:
+                mp_hands = mp.solutions.hands
+                return mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
+            except:
                 base_options = mp_tasks.BaseOptions(
                     model_asset_path=self.HAND_MODELS[model_name])
                 options = mp_tasks.vision.HandLandmarkerOptions(
@@ -1396,10 +1405,15 @@ class KeypointTransformer(nn.Module):
                     num_hands=2
                 )
                 return mp_tasks.vision.HandLandmarker.create_from_options(options)
-            except Exception as e:
-                print(
-                    f"Failed to load hand model {model_name}: {e}. Falling back to default.")
-                return mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
+        else:
+            base_options = mp_tasks.BaseOptions(
+                model_asset_path=self.HAND_MODELS[model_name])
+            options = mp_tasks.vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=mp_tasks.vision.RunningMode.IMAGE,
+                num_hands=2
+            )
+            return mp_tasks.vision.HandLandmarker.create_from_options(options)
 
     def extract_keypoints_from_frame(self, frame, pose_model, hand_model, pose_name, hand_name):
         """Extract keypoints using specified models
@@ -1619,7 +1633,8 @@ class KeypointTransformer(nn.Module):
         if multiple_mp:
             pose_keys = self.POSE_MODELS.keys()
             hand_keys = self.HAND_MODELS.keys()
-            count_videos = count_videos * len(list(pose_keys)) * len(list(hand_keys))
+            count_videos = count_videos * \
+                len(list(pose_keys)) * len(list(hand_keys))
         else:
             pose_keys = ['default']
             hand_keys = ['default']
@@ -1642,18 +1657,26 @@ class KeypointTransformer(nn.Module):
                         label = item
                         for video_file in os.listdir(path):
                             video_path = os.path.join(path, video_file)
-                            relative_path = os.path.relpath(video_path, root_dir)
-                            base_name = relative_path.replace('.mp4', '').replace('.avi', '').replace('.mov', '').replace('.mkv', '')
-                            cache_file = os.path.join(keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
-                            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-                            tasks.append((video_path, cache_file, video_file, label))
+                            relative_path = os.path.relpath(
+                                video_path, root_dir)
+                            base_name = relative_path.replace('.mp4', '').replace(
+                                '.avi', '').replace('.mov', '').replace('.mkv', '')
+                            cache_file = os.path.join(
+                                keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
+                            os.makedirs(os.path.dirname(
+                                cache_file), exist_ok=True)
+                            tasks.append(
+                                (video_path, cache_file, video_file, label))
                     elif os.path.isfile(path) and item.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
                         video_file = item
                         video_path = path
-                        base_name = item.replace('.mp4', '').replace('.avi', '').replace('.mov', '').replace('.mkv', '')
-                        cache_file = os.path.join(keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
+                        base_name = item.replace('.mp4', '').replace(
+                            '.avi', '').replace('.mov', '').replace('.mkv', '')
+                        cache_file = os.path.join(
+                            keypoints_cache_dir, f"{base_name}_{pose_name}_pose_{hand_name}_hand.json")
                         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-                        tasks.append((video_path, cache_file, video_file, "root"))
+                        tasks.append(
+                            (video_path, cache_file, video_file, "root"))
 
                 if not tasks:
                     continue
@@ -1674,19 +1697,24 @@ class KeypointTransformer(nn.Module):
                                 with open(cache_file, 'w') as f:
                                     json.dump(frames_keypoints, f)
                                 total_videos += 1
-                                print(f"[{curr}/{count_videos}] Processed {label}/{video_file} with {pose_name} pose and {hand_name} hand")
+                                print(
+                                    f"[{curr}/{count_videos}] Processed {label}/{video_file} with {pose_name} pose and {hand_name} hand")
                             except Exception as e:
-                                error_files.append((video_file, str(e), pose_name, hand_name))
-                                print(f"[{curr}/{count_videos}] Error processing {label}/{video_file} with {pose_name}/{hand_name}: {e}")
+                                error_files.append(
+                                    (video_file, str(e), pose_name, hand_name))
+                                print(
+                                    f"[{curr}/{count_videos}] Error processing {label}/{video_file} with {pose_name}/{hand_name}: {e}")
                         else:
-                            print(f"[{curr}/{count_videos}] Cache exists for {label}/{video_file} with {pose_name}/{hand_name}, skipping")
+                            print(
+                                f"[{curr}/{count_videos}] Cache exists for {label}/{video_file} with {pose_name}/{hand_name}, skipping")
 
                 # Parallel path: split tasks among workers; each worker initializes its own models once
                 else:
                     max_workers = max(1, int(num_workers))
                     # Split tasks into roughly equal chunks per worker
                     chunk_size = int(math.ceil(len(tasks) / max_workers))
-                    chunks = [tasks[i:i+chunk_size] for i in range(0, len(tasks), chunk_size)]
+                    chunks = [tasks[i:i+chunk_size]
+                              for i in range(0, len(tasks), chunk_size)]
                     lock = threading.Lock()
 
                     def _worker(subtasks):
@@ -1706,14 +1734,18 @@ class KeypointTransformer(nn.Module):
                                         json.dump(frames_keypoints, f)
                                     processed_local += 1
                                     with lock:
-                                        print(f"[{curr}/{count_videos}] Processed {label}/{video_file} with {pose_name} pose and {hand_name} hand")
+                                        print(
+                                            f"[{curr}/{count_videos}] Processed {label}/{video_file} with {pose_name} pose and {hand_name} hand")
                                 except Exception as e:
                                     with lock:
-                                        error_files.append((video_file, str(e), pose_name, hand_name))
-                                        print(f"[{curr}/{count_videos}] Error processing {label}/{video_file} with {pose_name}/{hand_name}: {e}")
+                                        error_files.append(
+                                            (video_file, str(e), pose_name, hand_name))
+                                        print(
+                                            f"[{curr}/{count_videos}] Error processing {label}/{video_file} with {pose_name}/{hand_name}: {e}")
                             else:
                                 with lock:
-                                    print(f"[{curr}/{count_videos}] Cache exists for {label}/{video_file} with {pose_name}/{hand_name}, skipping")
+                                    print(
+                                        f"[{curr}/{count_videos}] Cache exists for {label}/{video_file} with {pose_name}/{hand_name}, skipping")
                         return processed_local
 
                     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -1735,21 +1767,26 @@ class KeypointTransformer(nn.Module):
                         data = json.load(f)
                     # Check if empty or all values are zeros
                     if not data:
-                        error_files.append((item, "Cache is empty", "validation", "post-process"))
+                        error_files.append(
+                            (item, "Cache is empty", "validation", "post-process"))
                     elif not any(any(v != 0 for v in frame) for frame in data):
-                        error_files.append((item, "All keypoints are zero", "validation", "post-process"))
+                        error_files.append(
+                            (item, "All keypoints are zero", "validation", "post-process"))
                     else:
                         validated_count += 1
                 except Exception as e:
-                    error_files.append((item, f"Invalid JSON: {str(e)}", "validation", "post-process"))
+                    error_files.append(
+                        (item, f"Invalid JSON: {str(e)}", "validation", "post-process"))
 
         # Print summary
-        print(f"\nPreprocessing complete. Total new videos processed: {total_videos}")
+        print(
+            f"\nPreprocessing complete. Total new videos processed: {total_videos}")
         if error_files:
             print(f"\nWarning: {len(error_files)} files failed or invalid:")
             for video_file, error_msg, *rest in error_files:
                 if rest:
-                    pose_hand = f" [{rest[0]}/{rest[1]}]" if len(rest) >= 2 else ""
+                    pose_hand = f" [{rest[0]}/{rest[1]}]" if len(
+                        rest) >= 2 else ""
                 else:
                     pose_hand = ""
                 print(f"  - {video_file}{pose_hand}: {error_msg}")
