@@ -1538,8 +1538,12 @@ class KeypointTransformer(nn.Module):
 
         return result
 
-    def read_video_and_extract_keypoints(self, video_path, pose_model, hand_model, pose_name, hand_name, target_frames=16, show=False):
-        """Read video and extract keypoints for all frames"""
+    def read_video_and_extract_keypoints(self, video_path, pose_model, hand_model, pose_name, hand_name, target_frames=16, show=False, target_width=240, target_height=240):
+        """Read video and extract keypoints for all frames
+
+        Optionally center-crop and resize each frame to (`target_width`, `target_height`) before
+        keypoint extraction. If either target dimension is None the frame is left unchanged.
+        """
         cap = cv2.VideoCapture(video_path)
         frames_keypoints = []
         frame_count = 0
@@ -1551,8 +1555,31 @@ class KeypointTransformer(nn.Module):
             ret, frame = cap.read()
             if not ret:
                 break
+            # Optionally center-crop and resize the frame before extraction
+            processed_frame = frame
+            if target_width is not None and target_height is not None:
+                try:
+                    h, w = frame.shape[:2]
+                    desired_ar = float(target_width) / float(target_height)
+                    current_ar = float(w) / float(h)
+                    if current_ar > desired_ar:
+                        # frame is wider than desired -> crop width (center)
+                        new_w = int(desired_ar * h)
+                        left = (w - new_w) // 2
+                        processed_frame = frame[:, left:left+new_w]
+                    elif current_ar < desired_ar:
+                        # frame is taller -> crop height (center)
+                        new_h = int(w / desired_ar)
+                        top = (h - new_h) // 2
+                        processed_frame = frame[top:top+new_h, :]
+                    # Resize to target size
+                    processed_frame = cv2.resize(processed_frame, (int(target_width), int(target_height)), interpolation=cv2.INTER_LINEAR)
+                except Exception:
+                    # Fallback to original frame on any failure
+                    processed_frame = frame
+
             keypoints, pose_results, hands_results = self.extract_keypoints_from_frame(
-                frame, pose_model, hand_model, pose_name, hand_name)
+                processed_frame, pose_model, hand_model, pose_name, hand_name)
             frames_keypoints.append(keypoints)
             frame_count += 1
 
@@ -1560,7 +1587,7 @@ class KeypointTransformer(nn.Module):
                 mp_pose = mp.solutions.pose
                 mp_hands = mp.solutions.hands
                 mp_drawing = mp.solutions.drawing_utils
-                frame_copy = frame.copy()
+                frame_copy = processed_frame.copy()
                 # Draw pose
                 if pose_name == 'default' and pose_results and pose_results.pose_landmarks:
                     mp_drawing.draw_landmarks(
