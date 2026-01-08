@@ -1369,51 +1369,80 @@ class KeypointTransformer(nn.Module):
 
         return x
 
+    def draw_landmarks_on_image(self, rgb_image, pose_results, hands_results):
+        """Draw pose and hand landmarks on image using mp_tasks API results"""
+        annotated_image = rgb_image.copy()
+        h, w, c = rgb_image.shape
+
+        # Define connections for drawing
+        POSE_CONNECTIONS = [
+            (0, 1), (1, 3), (0, 2), (2, 4),  # Head
+            (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),  # Arms
+            (5, 11), (6, 12), (11, 12),  # Torso
+            (11, 13), (13, 15), (12, 14), (14, 16),  # Legs
+        ]
+
+        HAND_CONNECTIONS = [
+            (0, 1), (1, 2), (2, 3), (3, 4),  # Thumb
+            (0, 5), (5, 6), (6, 7), (7, 8),  # Index
+            (0, 9), (9, 10), (10, 11), (11, 12),  # Middle
+            (0, 13), (13, 14), (14, 15), (15, 16),  # Ring
+            (0, 17), (17, 18), (18, 19), (19, 20),  # Pinky
+        ]
+
+        # Draw pose landmarks
+        if pose_results and pose_results.pose_landmarks and len(pose_results.pose_landmarks) > 0:
+            for connection in POSE_CONNECTIONS:
+                start_idx, end_idx = connection
+                start = pose_results.pose_landmarks[0][start_idx]
+                end = pose_results.pose_landmarks[0][end_idx]
+                start_pos = (int(start.x * w), int(start.y * h))
+                end_pos = (int(end.x * w), int(end.y * h))
+                cv2.line(annotated_image, start_pos, end_pos, (0, 255, 0), 2)
+
+            # Draw landmarks as circles
+            for lm in pose_results.pose_landmarks[0]:
+                pos = (int(lm.x * w), int(lm.y * h))
+                cv2.circle(annotated_image, pos, 3, (0, 255, 0), -1)
+
+        # Draw hand landmarks
+        if hands_results and hands_results.hand_landmarks and len(hands_results.hand_landmarks) > 0:
+            colors = [(255, 0, 0), (0, 0, 255)]  # Blue and Red for left/right
+            for hand_idx, hand in enumerate(hands_results.hand_landmarks[:2]):
+                color = colors[hand_idx]
+                for connection in HAND_CONNECTIONS:
+                    start_idx, end_idx = connection
+                    start = hand[start_idx]
+                    end = hand[end_idx]
+                    start_pos = (int(start.x * w), int(start.y * h))
+                    end_pos = (int(end.x * w), int(end.y * h))
+                    cv2.line(annotated_image, start_pos, end_pos, color, 2)
+
+                # Draw landmarks as circles
+                for lm in hand:
+                    pos = (int(lm.x * w), int(lm.y * h))
+                    cv2.circle(annotated_image, pos, 2, color, -1)
+
+        return annotated_image
+
     def init_pose_model(self, model_name):
-        if model_name == 'default':
-            try:
-                mp_pose = mp.solutions.pose
-                return mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5)
-            except:
-                base_options = mp_tasks.BaseOptions(
-                    model_asset_path=self.POSE_MODELS[model_name])
-                options = mp_tasks.vision.PoseLandmarkerOptions(
-                    base_options=base_options,
-                    running_mode=mp_tasks.vision.RunningMode.IMAGE  # Use IMAGE mode
-                )
-                return mp_tasks.vision.PoseLandmarker.create_from_options(options)
-        else:
-            base_options = mp_tasks.BaseOptions(
-                model_asset_path=self.POSE_MODELS[model_name])
-            options = mp_tasks.vision.PoseLandmarkerOptions(
-                base_options=base_options,
-                running_mode=mp_tasks.vision.RunningMode.IMAGE  # Use IMAGE mode
-            )
-            return mp_tasks.vision.PoseLandmarker.create_from_options(options)
+        base_options = mp_tasks.BaseOptions(
+            model_asset_path=self.POSE_MODELS[model_name])
+        options = mp_tasks.vision.PoseLandmarkerOptions(
+            base_options=base_options,
+            running_mode=mp_tasks.vision.RunningMode.IMAGE  # Use IMAGE mode
+        )
+        return mp_tasks.vision.PoseLandmarker.create_from_options(options)
 
     def init_hand_model(self, model_name):
-        if model_name == 'default':
-            try:
-                mp_hands = mp.solutions.hands
-                return mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
-            except:
-                base_options = mp_tasks.BaseOptions(
-                    model_asset_path=self.HAND_MODELS[model_name])
-                options = mp_tasks.vision.HandLandmarkerOptions(
-                    base_options=base_options,
-                    running_mode=mp_tasks.vision.RunningMode.IMAGE,
-                    num_hands=2
-                )
-                return mp_tasks.vision.HandLandmarker.create_from_options(options)
-        else:
-            base_options = mp_tasks.BaseOptions(
-                model_asset_path=self.HAND_MODELS[model_name])
-            options = mp_tasks.vision.HandLandmarkerOptions(
-                base_options=base_options,
-                running_mode=mp_tasks.vision.RunningMode.IMAGE,
-                num_hands=2
-            )
-            return mp_tasks.vision.HandLandmarker.create_from_options(options)
+        base_options = mp_tasks.BaseOptions(
+            model_asset_path=self.HAND_MODELS[model_name])
+        options = mp_tasks.vision.HandLandmarkerOptions(
+            base_options=base_options,
+            running_mode=mp_tasks.vision.RunningMode.IMAGE,
+            num_hands=2
+        )
+        return mp_tasks.vision.HandLandmarker.create_from_options(options)
 
     def extract_keypoints_from_frame(self, frame, pose_model, hand_model, pose_name, hand_name):
         """Extract keypoints using specified models
@@ -1443,45 +1472,28 @@ class KeypointTransformer(nn.Module):
         hands_results = None
 
         # Extract pose keypoints (indices 0-98)
-        if pose_name == 'default':
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pose_results = pose_model.process(frame_rgb)
-            if pose_results.pose_landmarks:
-                for i, lm in enumerate(pose_results.pose_landmarks.landmark):
-                    keypoints[i*3:(i+1)*3] = [lm.x, lm.y, lm.z]
-        else:
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
-                                data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            pose_results = pose_model.detect(
-                mp_image)  # Use detect for IMAGE mode
-            if pose_results.pose_landmarks:
-                for i, lm in enumerate(pose_results.pose_landmarks[0]):
-                    keypoints[i*3:(i+1)*3] = [lm.x, lm.y, lm.z]
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
+                            data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        pose_results = pose_model.detect(mp_image)  # Use detect for IMAGE mode
+        if pose_results.pose_landmarks:
+            for i, lm in enumerate(pose_results.pose_landmarks[0]):
+                keypoints[i*3:(i+1)*3] = [lm.x, lm.y, lm.z]
 
         # Extract hand keypoints (indices 99-224: hand1 99-161, hand2 162-224)
         hand_start_idx = 99
-        if hand_name == 'default':
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            hands_results = hand_model.process(frame_rgb)
-            if hands_results.multi_hand_landmarks:
-                for hand_idx, hand_landmarks in enumerate(hands_results.multi_hand_landmarks[:2]):
-                    for i, lm in enumerate(hand_landmarks.landmark):
+        try:
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
+                                data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            hands_results = hand_model.detect(mp_image)
+            if hands_results.hand_landmarks:
+                for hand_idx, hand in enumerate(hands_results.hand_landmarks[:2]):
+                    for i, lm in enumerate(hand):
                         start = hand_start_idx + hand_idx * 63 + i * 3
                         keypoints[start:start+3] = [lm.x, lm.y, lm.z]
-        else:
-            try:
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
-                                    data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                hands_results = hand_model.detect(mp_image)
-                if hands_results.hand_landmarks:
-                    for hand_idx, hand in enumerate(hands_results.hand_landmarks[:2]):
-                        for i, lm in enumerate(hand):
-                            start = hand_start_idx + hand_idx * 63 + i * 3
-                            keypoints[start:start+3] = [lm.x, lm.y, lm.z]
-            except Exception as e:
-                print(
-                    f"Error detecting with hand model {hand_name}: {e}. Skipping hand keypoints.")
-                # Keypoints remain as zeros
+        except Exception as e:
+            print(
+                f"Error detecting with hand model {hand_name}: {e}. Skipping hand keypoints.")
+            # Keypoints remain as zeros
 
         return keypoints, pose_results, hands_results
 
@@ -1584,30 +1596,9 @@ class KeypointTransformer(nn.Module):
             frame_count += 1
 
             if show:
-                mp_pose = mp.solutions.pose
-                mp_hands = mp.solutions.hands
-                mp_drawing = mp.solutions.drawing_utils
-                frame_copy = processed_frame.copy()
-                # Draw pose
-                if pose_name == 'default' and pose_results and pose_results.pose_landmarks:
-                    mp_drawing.draw_landmarks(
-                        frame_copy, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-                elif pose_name != 'default' and pose_results and pose_results.pose_landmarks:
-                    # For Tasks API, pose_landmarks is list of NormalizedLandmark
-                    # Need to convert to landmark format for drawing
-                    # This might be tricky, perhaps skip drawing for Tasks API or implement conversion
-                    pass  # Skip drawing for Tasks API for now
-
-                # Draw hands
-                if hand_name == 'default' and hands_results and hands_results.multi_hand_landmarks:
-                    for hand_landmarks in hands_results.multi_hand_landmarks:
-                        mp_drawing.draw_landmarks(
-                            frame_copy, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                elif hand_name != 'default' and hands_results and hands_results.hand_landmarks:
-                    # Similarly for Tasks API hands
-                    pass  # Skip drawing for Tasks API for now
-
-                cv2.imshow('MediaPipe Keypoints', frame_copy)
+                annotated_image = self.draw_landmarks_on_image(
+                    cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), pose_results, hands_results)
+                cv2.imshow('MediaPipe Keypoints', cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
 
@@ -1635,6 +1626,10 @@ class KeypointTransformer(nn.Module):
         New: `num_workers` controls parallel processing of videos per (pose, hand) pair.
         If `num_workers` <= 1 the function runs sequentially (backwards-compatible).
         """
+        
+        if num_workers > 1:
+            show = False  # Disable show in multi-worker mode
+        
         if keypoints_cache_dir is None:
             keypoints_cache_dir = root_dir + '-json'
         os.makedirs(keypoints_cache_dir, exist_ok=True)
@@ -1668,6 +1663,11 @@ class KeypointTransformer(nn.Module):
 
         # Progress counter shared across all pose/hand combos
         processed = {'count': 0}
+        import time
+        start_time = time.time()
+        last_print = {'t': start_time}
+        # print every ~1% or every 30 items when unknown
+        step_print = max(1, count_videos // 100) if count_videos > 0 else 30
 
         # Local imports to avoid touching top-of-file imports
         import math
@@ -1716,6 +1716,21 @@ class KeypointTransformer(nn.Module):
                         # Update progress counter (counts attempted items)
                         processed['count'] += 1
                         curr = processed['count']
+                        # ETA/periodic progress print
+                        now = time.time()
+                        if (curr % step_print == 0 or curr == 1) and now - last_print['t'] >= 0.5:
+                            elapsed = now - start_time
+                            avg = elapsed / curr if curr > 0 else 0
+                            if count_videos:
+                                remaining = max(0, count_videos - curr)
+                                eta = int(remaining * avg)
+                                hrs, rem = divmod(eta, 3600)
+                                mins, secs = divmod(rem, 60)
+                                eta_str = f"{hrs:d}h{mins:02d}m{secs:02d}s" if hrs else f"{mins:02d}m{secs:02d}s"
+                                print(f"[Preprocess] [{curr}/{count_videos}] — ETA {eta_str} (avg {avg:.3f}s/item)")
+                            else:
+                                print(f"[Preprocess] [{curr}] processed — elapsed {int(elapsed)}s (avg {avg:.3f}s/item)")
+                            last_print['t'] = now
                         if force_recreate or not os.path.exists(cache_file):
                             try:
                                 frames_keypoints = self.read_video_and_extract_keypoints(
@@ -1752,6 +1767,21 @@ class KeypointTransformer(nn.Module):
                             with lock:
                                 processed['count'] += 1
                                 curr = processed['count']
+                                now = time.time()
+                                do_print = (curr % step_print == 0 or curr == 1) and now - last_print['t'] >= 0.5
+                                if do_print:
+                                    elapsed = now - start_time
+                                    avg = elapsed / curr if curr > 0 else 0
+                                    if count_videos:
+                                        remaining = max(0, count_videos - curr)
+                                        eta = int(remaining * avg)
+                                        hrs, rem = divmod(eta, 3600)
+                                        mins, secs = divmod(rem, 60)
+                                        eta_str = f"{hrs:d}h{mins:02d}m{secs:02d}s" if hrs else f"{mins:02d}m{secs:02d}s"
+                                        print(f"[Preprocess] [{curr}/{count_videos}] — ETA {eta_str} (avg {avg:.3f}s/item)")
+                                    else:
+                                        print(f"[Preprocess] [{curr}] processed — elapsed {int(elapsed)}s (avg {avg:.3f}s/item)")
+                                    last_print['t'] = now
                             if force_recreate or not os.path.exists(cache_file):
                                 try:
                                     frames_keypoints = self.read_video_and_extract_keypoints(
@@ -2122,26 +2152,9 @@ class KeypointTransformer(nn.Module):
                 next_sample += sample_interval
 
                 if show:
-                    mp_pose = mp.solutions.pose
-                    mp_hands = mp.solutions.hands
-                    mp_drawing = mp.solutions.drawing_utils
-                    frame_copy = frame.copy()
-                    # Draw pose
-                    if pose_name == 'default' and pose_results and pose_results.pose_landmarks:
-                        mp_drawing.draw_landmarks(
-                            frame_copy, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-                    elif pose_name != 'default' and pose_results and pose_results.pose_landmarks:
-                        pass  # Skip drawing for Tasks API for now
-
-                    # Draw hands
-                    if hand_name == 'default' and hands_results and hands_results.multi_hand_landmarks:
-                        for hand_landmarks in hands_results.multi_hand_landmarks:
-                            mp_drawing.draw_landmarks(
-                                frame_copy, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                    elif hand_name != 'default' and hands_results and hands_results.hand_landmarks:
-                        pass  # Skip drawing for Tasks API for now
-
-                    cv2.imshow('MediaPipe Keypoints', frame_copy)
+                    annotated_image = self.draw_landmarks_on_image(
+                        cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), pose_results, hands_results)
+                    cv2.imshow('MediaPipe Keypoints', cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
 
@@ -2171,14 +2184,9 @@ class KeypointTransformer(nn.Module):
             List of (label_name, confidence) tuples
         """
 
-        # Initialize MediaPipe
-        mp_pose = mp.solutions.pose
-        mp_hands = mp.solutions.hands
-
-        pose_model = mp_pose.Pose(
-            static_image_mode=False, min_detection_confidence=0.5)
-        hands_model = mp_hands.Hands(
-            static_image_mode=False, max_num_hands=2, min_detection_confidence=0.5)
+        # Initialize MediaPipe models using mp_tasks
+        pose_model = self.init_pose_model('lite')
+        hands_model = self.init_hand_model('hand_landmarker')
 
         # Extract keypoints with FPS
         print(f"Extracting keypoints from {video_path}...")

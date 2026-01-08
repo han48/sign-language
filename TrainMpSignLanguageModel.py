@@ -38,7 +38,7 @@ if __name__ == '__main__':
     # Preprocess keypoints for train dataset
     print("Preprocessing keypoints for train dataset...")
     model.preprocess_keypoints('dataset/train', 'dataset/label_mapping.json',
-                               show=args.show, force_recreate=args.force_recreate, multiple_mp=True)
+                               show=args.show, force_recreate=args.force_recreate, multiple_mp=True, num_workers=10)
 
     # Preprocess keypoints for public test
     print("Preprocessing keypoints for public test...")
